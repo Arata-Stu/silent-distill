@@ -90,6 +90,22 @@ sla-pretrain --config-name mvsec
 `/davis/left/events`です。right cameraはindex時の`--camera right`とconfigの
 `data.event_camera: right`で選べます。
 
+MVSECの学習前確認として、5 ms event windowをPNGへ描画できます。negative eventは赤、
+positive eventは青で表示します。`--frames`を2以上にして`.gif`または`.mp4`を指定すると
+時系列表示になります。
+
+```bash
+sla-visualize-events \
+  --input /datasets/mvsec/outdoor_day/outdoor_day1_data.hdf5 \
+  --output outputs/visualizations/mvsec_day1_5ms.png \
+  --camera left --window-us 5000
+
+sla-visualize-events \
+  --input /datasets/mvsec/outdoor_day/outdoor_day1_data.hdf5 \
+  --output outputs/visualizations/mvsec_day1.mp4 \
+  --camera left --window-us 5000 --step-us 5000 --frames 100 --fps 20
+```
+
 `/data`だけを持つprecomputed tensor H5はraw event streamではありません。任意のshort/long
 windowを再構成できないため、この実装の入力対象外です。1 Mpx H5にはtimestamp付きの
 `x,y,t,p` event arraysが必要です。
