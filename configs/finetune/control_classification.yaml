@@ -1,0 +1,47 @@
+seed: 42
+device: cuda
+task: classification
+output_dir: outputs/finetune/control_classification_1ms
+
+data:
+  root: /datasets/control_events
+  train_manifest: /datasets/control_events/manifests/train_classification.jsonl
+  validation_manifest: /datasets/control_events/manifests/val_classification.jsonl
+  height: 128
+  width: 128
+  bins: 5
+  short_window_us: 1000
+  long_window_us: 5000
+  use_polarity: true
+  representation: count
+  occupancy_stride: 4
+  temporal_shuffle: false
+  horizontal_flip_probability: 0.0
+
+model:
+  backbone: resnet18
+  small_stem: true
+  num_classes: 11
+  dropout: 0.1
+
+training:
+  pretrained_checkpoint: outputs/pretrain/control_sla/checkpoint_last.pt
+  resume: null
+  epochs: 30
+  freeze_backbone_epochs: 0
+  batch_size: 64
+  num_workers: 8
+  learning_rate: 0.001
+  minimum_lr: 0.00001
+  weight_decay: 0.0001
+  warmup_epochs: 2
+  gradient_clip_norm: 1.0
+  amp: true
+  log_every: 20
+  save_every_epochs: 5
+
+evaluation:
+  every_epochs: 1
+  low_density_max: 0.001
+  high_density_min: 0.01
+

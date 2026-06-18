@@ -1,0 +1,33 @@
+seed: 42
+device: cuda
+task: classification
+checkpoint: outputs/finetune/control_classification_1ms/checkpoint_last.pt
+output_file: outputs/eval/control_classification_1ms.json
+
+data:
+  root: /datasets/control_events
+  manifest: /datasets/control_events/manifests/test_classification.jsonl
+  height: 128
+  width: 128
+  bins: 5
+  short_window_us: 1000
+  long_window_us: 5000
+  use_polarity: true
+  representation: count
+  occupancy_stride: 4
+  temporal_shuffle: false
+  horizontal_flip_probability: 0.0
+
+model:
+  backbone: resnet18
+  small_stem: true
+  num_classes: 11
+  dropout: 0.1
+
+training:
+  batch_size: 64
+  num_workers: 8
+
+evaluation:
+  low_density_max: 0.001
+  high_density_min: 0.01

@@ -1,0 +1,12 @@
+max_samples: 100000
+
+data:
+  root: /datasets/prophesee_1mpx
+  manifest: /datasets/prophesee_1mpx/manifests/train_detection.jsonl
+  event_camera: left
+  event_group: null
+  timestamp_scale_to_us: null
+  timestamp_offset_us: null
+  height: 720
+  width: 1280
+  short_window_us: 1000

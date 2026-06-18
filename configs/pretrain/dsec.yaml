@@ -1,0 +1,55 @@
+seed: 42
+device: cuda
+output_dir: outputs/pretrain/dsec_sla
+
+data:
+  root: /datasets/dsec
+  manifest: /datasets/dsec/manifests/train_ssl.jsonl
+  event_camera: left
+  event_group: /events
+  timestamp_scale_to_us: 1.0
+  timestamp_offset_us: null
+  height: 480
+  width: 640
+  bins: 5
+  short_window_us: 1000
+  long_window_us: 5000
+  use_polarity: true
+  representation: count
+  occupancy_stride: 8
+  temporal_shuffle: false
+  horizontal_flip_probability: 0.5
+
+model:
+  backbone: resnet50
+  small_stem: false
+  projection_hidden_dim: 2048
+  projection_dim: 256
+  ema_momentum: 0.996
+  ema_momentum_end: 1.0
+
+loss:
+  lambda_s2l: 1.0
+  lambda_silence: 1.0
+  lambda_polarity: 0.0
+  lambda_rate: 0.0
+  negative_modes: [random, near]
+  negative_ratio: 3.0
+  negative_weight: 1.0
+  near_radius: 2
+  min_negatives: 1024
+
+training:
+  epochs: 100
+  batch_size: 8
+  num_workers: 8
+  learning_rate: 0.0002
+  minimum_lr: 0.000002
+  weight_decay: 0.05
+  warmup_epochs: 5
+  gradient_clip_norm: 1.0
+  amp: true
+  log_every: 20
+  save_every_epochs: 5
+  resume: null
+
