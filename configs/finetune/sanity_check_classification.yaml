@@ -1,6 +1,7 @@
 seed: 42
 device: cuda
-run_name: control_resnet18
+task: classification
+run_name: sanity_check_classification_resnet18
 output_dir: ${hydra:runtime.output_dir}
 
 tensorboard:
@@ -9,8 +10,9 @@ tensorboard:
   flush_secs: 30
 
 data:
-  root: /datasets/control_events
-  manifest: /datasets/control_events/manifests/train_ssl.jsonl
+  root: /datasets/sanity_check_events
+  train_manifest: /datasets/sanity_check_events/manifests/train_classification.jsonl
+  validation_manifest: /datasets/sanity_check_events/manifests/val_classification.jsonl
   height: 128
   width: 128
   bins: 5
@@ -29,41 +31,33 @@ data:
 model:
   backbone: resnet18
   small_stem: true
-  projection_hidden_dim: 512
-  projection_dim: 128
-  ema_momentum: 0.99
-  ema_momentum_end: 1.0
-  multi_scale_distillation: true
-  distillation_scales: all
+  num_classes: 11
+  dropout: 0.1
   recurrent: none
   recurrent_hidden_dim: 512
   recurrent_layers: 1
   recurrent_dropout: 0.0
 
-loss:
-  lambda_s2l: 1.0
-  lambda_silence: 1.0
-  lambda_polarity: 0.0
-  lambda_rate: 0.0
-  negative_modes: [random, near]
-  negative_ratio: 3.0
-  negative_weight: 1.0
-  near_radius: 2
-  min_negatives: 256
-
 training:
-  epochs: 50
+  pretrained_checkpoint: ${oc.env:PRETRAINED_CHECKPOINT,null}
+  resume: null
+  epochs: 30
+  freeze_backbone_epochs: 0
   batch_size: 64
   num_workers: 8
   learning_rate: 0.001
   minimum_lr: 0.00001
-  weight_decay: 0.05
-  warmup_epochs: 5
+  weight_decay: 0.0001
+  warmup_epochs: 2
   gradient_clip_norm: 1.0
   amp: true
   log_every: 20
   save_every_epochs: 5
-  resume: null
+
+evaluation:
+  every_epochs: 1
+  low_density_max: 0.001
+  high_density_min: 0.01
 
 hydra:
   run:

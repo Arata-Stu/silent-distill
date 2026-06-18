@@ -99,8 +99,8 @@ NumPy 形式の小規模データは `split/class_name/*.npz` または `*.npy` 
 
 ```bash
 sla-convert-numpy \
-  --input-root /raw/control_events \
-  --output-root /datasets/control_events \
+  --input-root /raw/sanity_check_events \
+  --output-root /datasets/sanity_check_events \
   --height 128 --width 128 --timestamp-scale 1
 ```
 
@@ -174,8 +174,8 @@ tensorboard --logdir outputs/train
 windowを参照しません。ViT + GRU + multi-scale distillationの小規模設定は次で実行できます。
 
 ```bash
-sla-pretrain --config-name control_vit_gru
-sla-finetune --config-name control_classification_vit_gru \
+sla-pretrain --config-name sanity_check_experiment_vit_gru
+sla-finetune --config-name sanity_check_classification_vit_gru \
   training.pretrained_checkpoint=/path/to/pretrain/checkpoint_last.pt
 ```
 

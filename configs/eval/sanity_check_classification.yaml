@@ -1,12 +1,12 @@
 seed: 42
 device: cuda
 task: classification
-checkpoint: outputs/finetune/control_classification_1ms/checkpoint_last.pt
-output_file: outputs/eval/control_classification_1ms.json
+checkpoint: outputs/finetune/sanity_check_classification_1ms/checkpoint_last.pt
+output_file: outputs/eval/sanity_check_classification_1ms.json
 
 data:
-  root: /datasets/control_events
-  manifest: /datasets/control_events/manifests/test_classification.jsonl
+  root: /datasets/sanity_check_events
+  manifest: /datasets/sanity_check_events/manifests/test_classification.jsonl
   height: 128
   width: 128
   bins: 5

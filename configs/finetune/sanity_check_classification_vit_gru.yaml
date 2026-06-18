@@ -1,7 +1,7 @@
 seed: 42
 device: cuda
 task: classification
-run_name: control_classification_vit_small_gru
+run_name: sanity_check_classification_vit_small_gru
 output_dir: ${hydra:runtime.output_dir}
 
 tensorboard:
@@ -10,9 +10,9 @@ tensorboard:
   flush_secs: 30
 
 data:
-  root: /datasets/control_events
-  train_manifest: /datasets/control_events/manifests/train_classification.jsonl
-  validation_manifest: /datasets/control_events/manifests/val_classification.jsonl
+  root: /datasets/sanity_check_events
+  train_manifest: /datasets/sanity_check_events/manifests/train_classification.jsonl
+  validation_manifest: /datasets/sanity_check_events/manifests/val_classification.jsonl
   height: 128
   width: 128
   bins: 5
