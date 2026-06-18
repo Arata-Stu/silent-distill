@@ -1,0 +1,47 @@
+seed: 42
+device: cuda
+task: classification
+checkpoint: /path/to/finetune/checkpoint_last.pt
+output_file: outputs/eval/control_classification_vit_gru.json
+
+data:
+  root: /datasets/control_events
+  manifest: /datasets/control_events/manifests/test_classification.jsonl
+  height: 128
+  width: 128
+  bins: 5
+  short_window_us: 1000
+  long_window_us: 5000
+  use_polarity: true
+  representation: count
+  occupancy_stride: 4
+  temporal_shuffle: false
+  horizontal_flip_probability: 0.0
+  sequence_length: 4
+  sequence_step: 1
+  sequence_stride: 1
+  max_sequence_gap_us: 10000
+
+model:
+  backbone: vit_small
+  small_stem: false
+  vit_patch_size: 8
+  vit_embed_dim: 384
+  vit_depth: 8
+  vit_num_heads: 6
+  vit_mlp_ratio: 4.0
+  vit_dropout: 0.0
+  num_classes: 11
+  dropout: 0.1
+  recurrent: gru
+  recurrent_hidden_dim: 384
+  recurrent_layers: 1
+  recurrent_dropout: 0.0
+
+training:
+  batch_size: 16
+  num_workers: 8
+
+evaluation:
+  low_density_max: 0.001
+  high_density_min: 0.01

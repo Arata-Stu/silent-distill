@@ -1,7 +1,7 @@
 seed: 42
 device: cuda
 task: classification
-run_name: control_classification_resnet18
+run_name: control_classification_vit_small_gru
 output_dir: ${hydra:runtime.output_dir}
 
 tensorboard:
@@ -23,18 +23,24 @@ data:
   occupancy_stride: 4
   temporal_shuffle: false
   horizontal_flip_probability: 0.0
-  sequence_length: 1
+  sequence_length: 4
   sequence_step: 1
   sequence_stride: 1
-  max_sequence_gap_us: 0
+  max_sequence_gap_us: 10000
 
 model:
-  backbone: resnet18
-  small_stem: true
+  backbone: vit_small
+  small_stem: false
+  vit_patch_size: 8
+  vit_embed_dim: 384
+  vit_depth: 8
+  vit_num_heads: 6
+  vit_mlp_ratio: 4.0
+  vit_dropout: 0.0
   num_classes: 11
   dropout: 0.1
-  recurrent: none
-  recurrent_hidden_dim: 512
+  recurrent: gru
+  recurrent_hidden_dim: 384
   recurrent_layers: 1
   recurrent_dropout: 0.0
 
@@ -43,10 +49,10 @@ training:
   resume: null
   epochs: 30
   freeze_backbone_epochs: 0
-  batch_size: 64
+  batch_size: 16
   num_workers: 8
-  learning_rate: 0.001
-  minimum_lr: 0.00001
+  learning_rate: 0.0003
+  minimum_lr: 0.000003
   weight_decay: 0.0001
   warmup_epochs: 2
   gradient_clip_norm: 1.0

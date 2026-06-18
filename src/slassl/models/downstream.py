@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from torch import nn
 from torchvision.models.detection import FCOS
 from torchvision.models.detection.backbone_utils import resnet_fpn_backbone
 
-from slassl.models.encoder import ResNetEncoder, flatten_voxel
+from slassl.models.encoder import TemporalEncoder
 
 
 class ClassificationModel(nn.Module):
@@ -16,14 +18,19 @@ class ClassificationModel(nn.Module):
         num_classes: int,
         small_stem: bool,
         dropout: float = 0.0,
+        model_config: Any | None = None,
     ) -> None:
         super().__init__()
-        self.encoder = ResNetEncoder(backbone, input_channels, small_stem)
-        self.head = nn.Sequential(nn.Dropout(dropout), nn.Linear(self.encoder.output_dim, num_classes))
+        self.encoder = TemporalEncoder(
+            backbone, input_channels, small_stem, model_config=model_config
+        )
+        self.head = nn.Sequential(
+            nn.Dropout(dropout), nn.Linear(self.encoder.output_dim, num_classes)
+        )
 
     def forward(self, voxel: torch.Tensor) -> torch.Tensor:
-        _, feature = self.encoder(flatten_voxel(voxel))
-        return self.head(feature)
+        _, feature_sequence = self.encoder(voxel)
+        return self.head(feature_sequence[:, -1])
 
 
 def build_detector(
@@ -33,6 +40,8 @@ def build_detector(
     min_size: int,
     max_size: int,
 ) -> FCOS:
+    if not backbone_name.startswith("resnet"):
+        raise ValueError("FCOS fine-tuning currently requires a ResNet backbone")
     backbone = resnet_fpn_backbone(
         backbone_name=backbone_name, weights=None, trainable_layers=5
     )
@@ -60,13 +69,39 @@ def load_pretrained_encoder(
 ) -> tuple[list[str], list[str]]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = checkpoint.get("model", checkpoint)
-    prefixes = ("module.student_encoder.backbone.", "student_encoder.backbone.")
     encoder_state: dict[str, torch.Tensor] = {}
-    for key, value in state.items():
-        for prefix in prefixes:
-            if key.startswith(prefix):
-                encoder_state[destination_prefix + key[len(prefix) :]] = value
-                break
+    if destination_prefix == "encoder.":
+        prefixes = ("module.student_encoder.", "student_encoder.")
+        legacy_prefixes = (
+            "module.student_encoder.backbone.",
+            "student_encoder.backbone.",
+        )
+        for key, value in state.items():
+            legacy_match = False
+            for prefix in legacy_prefixes:
+                if key.startswith(prefix):
+                    suffix = key[len(prefix) :]
+                    encoder_state[destination_prefix + "frame_encoder.backbone." + suffix] = value
+                    legacy_match = True
+                    break
+            if legacy_match:
+                continue
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    encoder_state[destination_prefix + key[len(prefix) :]] = value
+                    break
+    else:
+        prefixes = (
+            "module.student_encoder.frame_encoder.backbone.",
+            "student_encoder.frame_encoder.backbone.",
+            "module.student_encoder.backbone.",
+            "student_encoder.backbone.",
+        )
+        for key, value in state.items():
+            for prefix in prefixes:
+                if key.startswith(prefix):
+                    encoder_state[destination_prefix + key[len(prefix) :]] = value
+                    break
     if not encoder_state:
         raise ValueError(f"No student encoder weights found in {checkpoint_path}")
     incompatible = module.load_state_dict(encoder_state, strict=False)

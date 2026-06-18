@@ -4,12 +4,13 @@ import json
 from pathlib import Path
 from typing import Any
 
+import hydra
 import torch
 import torch.nn.functional as F
+from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
-from slassl.config import config_parser, load_config
 from slassl.evaluation import evaluate_classification, evaluate_detection
 from slassl.models import ClassificationModel, build_detector
 from slassl.models.downstream import load_pretrained_encoder
@@ -18,6 +19,9 @@ from slassl.training import (
     build_dataset,
     build_loader,
     cosine_warmup_scheduler,
+    create_summary_writer,
+    log_tensorboard_scalars,
+    resolved_config,
 )
 from slassl.utils import (
     atomic_torch_save,
@@ -38,8 +42,11 @@ def build_model(config: Any) -> torch.nn.Module:
             int(config.model.num_classes),
             bool(config.model.small_stem),
             float(config.model.get("dropout", 0.0)),
+            config.model,
         )
     if config.task == "detection":
+        if str(config.model.get("recurrent", "none")) != "none":
+            raise ValueError("Recurrent fine-tuning is currently supported for classification only")
         return build_detector(
             config.model.backbone,
             channels,
@@ -81,9 +88,12 @@ def _validation(model: torch.nn.Module, loader: Any, config: Any, device: torch.
     return evaluate_detection(model, loader, device, low_max, high_min)
 
 
-def main() -> None:
-    args = config_parser("Fine-tune an SLA-SSL encoder").parse_args()
-    config = load_config(args.config, args.set)
+@hydra.main(
+    version_base="1.3",
+    config_path="../../../configs/finetune",
+    config_name="prophesee_1mp_detection",
+)
+def main(config: DictConfig) -> None:
     rank, world_size, local_rank = init_distributed()
     if world_size > 1 and int(config.training.get("freeze_backbone_epochs", 0)) > 0:
         raise ValueError("freeze_backbone_epochs > 0 is supported only for single-GPU fine-tuning")
@@ -125,6 +135,7 @@ def main() -> None:
     amp_enabled = bool(config.training.amp) and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     output_dir = Path(config.output_dir)
+    writer = create_summary_writer(config, output_dir) if is_main_process() else None
     start_epoch, global_step = 0, 0
     if config.training.get("resume"):
         checkpoint = torch.load(config.training.resume, map_location="cpu", weights_only=False)
@@ -137,7 +148,9 @@ def main() -> None:
     if is_main_process():
         output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "resolved_config.json").open("w", encoding="utf-8") as handle:
-            json.dump(config, handle, indent=2)
+            json.dump(resolved_config(config), handle, indent=2)
+        if writer is not None:
+            writer.add_text("config", f"```yaml\n{OmegaConf.to_yaml(config, resolve=True)}\n```")
 
     try:
         for epoch in range(start_epoch, int(config.training.epochs)):
@@ -157,7 +170,10 @@ def main() -> None:
                         labels = batch["label"].to(device, non_blocking=True)
                         loss = F.cross_entropy(model(inputs), labels)
                     else:
-                        images = [voxel.flatten(0, 1).to(device) for voxel in batch["short"]]
+                        short = batch["short"]
+                        if short.ndim == 6:
+                            short = short[:, -1]
+                        images = [voxel.flatten(0, 1).to(device) for voxel in short]
                         targets = [
                             {key: value.to(device) for key, value in target.items()}
                             for target in batch["target"]
@@ -167,7 +183,9 @@ def main() -> None:
                 scaler.scale(loss).backward()
                 if float(config.training.gradient_clip_norm) > 0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), config.training.gradient_clip_norm
+                    )
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
@@ -180,6 +198,7 @@ def main() -> None:
                         "lr": scheduler.get_last_lr()[0],
                     }
                     append_metrics(output_dir / "metrics.jsonl", metrics)
+                    log_tensorboard_scalars(writer, "train", metrics, global_step)
                     progress.set_postfix(loss=f"{metrics['loss']:.4f}")
 
             if validation_loader is not None and (
@@ -189,6 +208,7 @@ def main() -> None:
                 append_metrics(
                     output_dir / "validation_metrics.jsonl", {"epoch": epoch, **metrics}
                 )
+                log_tensorboard_scalars(writer, "validation", metrics, epoch + 1)
             if is_main_process() and (
                 (epoch + 1) % int(config.training.save_every_epochs) == 0
                 or epoch + 1 == int(config.training.epochs)
@@ -201,11 +221,13 @@ def main() -> None:
                     "epoch": epoch,
                     "global_step": global_step,
                     "task": config.task,
-                    "config": dict(config),
+                    "config": resolved_config(config),
                 }
                 atomic_torch_save(state, output_dir / f"checkpoint_{epoch + 1:04d}.pt")
                 atomic_torch_save(state, output_dir / "checkpoint_last.pt")
     finally:
+        if writer is not None:
+            writer.close()
         cleanup_distributed()
 
 

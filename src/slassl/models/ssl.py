@@ -13,7 +13,7 @@ from slassl.losses import (
     normalized_distillation_loss,
     polarity_loss,
 )
-from slassl.models.encoder import ResNetEncoder, flatten_voxel
+from slassl.models.encoder import TemporalEncoder
 
 
 class ProjectionHead(nn.Module):
@@ -57,22 +57,59 @@ class SLASSLModel(nn.Module):
         projection_dim: int,
         small_stem: bool,
         loss_config: Any,
+        model_config: Any | None = None,
     ) -> None:
         super().__init__()
+        model_config = model_config or {}
         self.polarity_channels = polarity_channels
         self.temporal_bins = temporal_bins
-        self.student_encoder = ResNetEncoder(backbone, input_channels, small_stem)
+        self.student_encoder = TemporalEncoder(
+            backbone, input_channels, small_stem, model_config=model_config
+        )
         self.student_projector = ProjectionHead(
             self.student_encoder.output_dim, projection_hidden_dim, projection_dim
         )
         self.teacher_encoder = deepcopy(self.student_encoder)
         self.teacher_projector = deepcopy(self.student_projector)
+        self.scale_indices: dict[str, int] = {}
+        if bool(model_config.get("multi_scale_distillation", True)):
+            requested = model_config.get("distillation_scales", "all")
+            selected = (
+                self.student_encoder.feature_names
+                if requested == "all"
+                else [str(name) for name in requested]
+            )
+            available = dict(
+                zip(
+                    self.student_encoder.feature_names,
+                    range(len(self.student_encoder.feature_names)),
+                    strict=True,
+                )
+            )
+            unknown = set(selected) - set(available)
+            if unknown:
+                raise ValueError(
+                    f"Unknown distillation scales {sorted(unknown)}; "
+                    f"available scales are {list(available)}"
+                )
+            self.scale_indices = {name: available[name] for name in selected}
+        self.student_scale_projectors = nn.ModuleDict(
+            {
+                name: ProjectionHead(
+                    self.student_encoder.feature_dims[index],
+                    projection_hidden_dim,
+                    projection_dim,
+                )
+                for name, index in self.scale_indices.items()
+            }
+        )
+        self.teacher_scale_projectors = deepcopy(self.student_scale_projectors)
         for parameter in list(self.teacher_encoder.parameters()) + list(
             self.teacher_projector.parameters()
-        ):
+        ) + list(self.teacher_scale_projectors.parameters()):
             parameter.requires_grad_(False)
         self.occupancy_head = OccupancyHead(
-            self.student_encoder.output_dim, polarity_channels * temporal_bins
+            self.student_encoder.feature_dims[-1], polarity_channels * temporal_bins
         )
         self.silence_loss = SilenceAwareLoss(
             modes=loss_config.negative_modes,
@@ -90,25 +127,58 @@ class SLASSLModel(nn.Module):
         super().train(mode)
         self.teacher_encoder.eval()
         self.teacher_projector.eval()
+        self.teacher_scale_projectors.eval()
         return self
 
     def forward(
         self, short: torch.Tensor, long: torch.Tensor, occupancy: torch.Tensor
     ) -> dict[str, torch.Tensor]:
-        student_map, student_feature = self.student_encoder(flatten_voxel(short))
+        student_maps, student_feature = self.student_encoder(short)
         student_projection = self.student_projector(student_feature)
         with torch.no_grad():
-            _, teacher_feature = self.teacher_encoder(flatten_voxel(long))
+            teacher_maps, teacher_feature = self.teacher_encoder(long)
             teacher_projection = self.teacher_projector(teacher_feature)
-        raw_logits = self.occupancy_head(student_map, occupancy.shape[-2:])
-        logits = raw_logits.view(
-            short.shape[0], self.polarity_channels, self.temporal_bins, *occupancy.shape[-2:]
-        )
 
-        s2l = normalized_distillation_loss(student_projection, teacher_projection)
-        silence, sampling_stats = self.silence_loss(logits, occupancy)
-        polarity = polarity_loss(logits, occupancy)
-        rate = event_rate_loss(logits, occupancy)
+        distillation_losses = {
+            "global": normalized_distillation_loss(student_projection, teacher_projection)
+        }
+        for name, index in self.scale_indices.items():
+            student_scale = student_maps[index].mean(dim=(-2, -1))
+            teacher_scale = teacher_maps[index].mean(dim=(-2, -1))
+            student_scale = self.student_scale_projectors[name](student_scale)
+            with torch.no_grad():
+                teacher_scale = self.teacher_scale_projectors[name](teacher_scale)
+            distillation_losses[name] = normalized_distillation_loss(
+                student_scale, teacher_scale
+            )
+        s2l = torch.stack(list(distillation_losses.values())).mean()
+
+        if occupancy.ndim == 5:
+            occupancy = occupancy.unsqueeze(1)
+        if occupancy.ndim != 6:
+            raise ValueError(f"Expected sequence occupancy target, received {occupancy.shape}")
+        batch, timesteps = occupancy.shape[:2]
+        deepest = student_maps[-1]
+        raw_logits = self.occupancy_head(
+            deepest.reshape(batch * timesteps, *deepest.shape[2:]), occupancy.shape[-2:]
+        )
+        logits = raw_logits.reshape(
+            batch,
+            timesteps,
+            self.polarity_channels,
+            self.temporal_bins,
+            *occupancy.shape[-2:],
+        )
+        flat_logits = logits.reshape(
+            batch * timesteps,
+            self.polarity_channels,
+            self.temporal_bins,
+            *occupancy.shape[-2:],
+        )
+        flat_occupancy = occupancy.reshape_as(flat_logits)
+        silence, sampling_stats = self.silence_loss(flat_logits, flat_occupancy)
+        polarity = polarity_loss(flat_logits, flat_occupancy)
+        rate = event_rate_loss(flat_logits, flat_occupancy)
         total = (
             self.lambda_s2l * s2l
             + self.lambda_silence * silence
@@ -121,6 +191,10 @@ class SLASSLModel(nn.Module):
             "loss_silence": silence.detach(),
             "loss_polarity": polarity.detach(),
             "loss_rate": rate.detach(),
+            **{
+                f"loss_s2l_{name}": value.detach()
+                for name, value in distillation_losses.items()
+            },
             **sampling_stats,
         }
 
@@ -129,6 +203,7 @@ class SLASSLModel(nn.Module):
         pairs = (
             (self.student_encoder, self.teacher_encoder),
             (self.student_projector, self.teacher_projector),
+            (self.student_scale_projectors, self.teacher_scale_projectors),
         )
         for student, teacher in pairs:
             for student_parameter, teacher_parameter in zip(

@@ -1,6 +1,6 @@
 seed: 42
 device: cuda
-run_name: mvsec_resnet50
+run_name: control_vit_small_gru
 output_dir: ${hydra:runtime.output_dir}
 
 tensorboard:
@@ -9,14 +9,10 @@ tensorboard:
   flush_secs: 30
 
 data:
-  root: /datasets/mvsec
-  manifest: /datasets/mvsec/manifests/train_ssl.jsonl
-  event_camera: left
-  event_group: null
-  timestamp_scale_to_us: null
-  timestamp_offset_us: null
-  height: 260
-  width: 346
+  root: /datasets/control_events
+  manifest: /datasets/control_events/manifests/train_ssl.jsonl
+  height: 128
+  width: 128
   bins: 5
   short_window_us: 1000
   long_window_us: 5000
@@ -24,23 +20,29 @@ data:
   representation: count
   occupancy_stride: 4
   temporal_shuffle: false
-  horizontal_flip_probability: 0.5
-  sequence_length: 1
+  horizontal_flip_probability: 0.0
+  sequence_length: 4
   sequence_step: 1
   sequence_stride: 1
-  max_sequence_gap_us: 0
+  max_sequence_gap_us: 10000
 
 model:
-  backbone: resnet50
+  backbone: vit_small
   small_stem: false
-  projection_hidden_dim: 2048
+  vit_patch_size: 8
+  vit_embed_dim: 384
+  vit_depth: 8
+  vit_num_heads: 6
+  vit_mlp_ratio: 4.0
+  vit_dropout: 0.0
+  projection_hidden_dim: 768
   projection_dim: 256
-  ema_momentum: 0.996
+  ema_momentum: 0.99
   ema_momentum_end: 1.0
   multi_scale_distillation: true
   distillation_scales: all
-  recurrent: none
-  recurrent_hidden_dim: 2048
+  recurrent: gru
+  recurrent_hidden_dim: 384
   recurrent_layers: 1
   recurrent_dropout: 0.0
 
@@ -53,14 +55,14 @@ loss:
   negative_ratio: 3.0
   negative_weight: 1.0
   near_radius: 2
-  min_negatives: 512
+  min_negatives: 256
 
 training:
-  epochs: 100
+  epochs: 50
   batch_size: 16
   num_workers: 8
-  learning_rate: 0.0002
-  minimum_lr: 0.000002
+  learning_rate: 0.0003
+  minimum_lr: 0.000003
   weight_decay: 0.05
   warmup_epochs: 5
   gradient_clip_norm: 1.0

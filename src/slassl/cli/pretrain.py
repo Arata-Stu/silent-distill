@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import hydra
 import torch
+from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
-from slassl.config import config_parser, load_config
 from slassl.models import SLASSLModel
 from slassl.training import (
     append_metrics,
@@ -15,6 +16,9 @@ from slassl.training import (
     build_loader,
     cosine_momentum,
     cosine_warmup_scheduler,
+    create_summary_writer,
+    log_tensorboard_scalars,
+    resolved_config,
 )
 from slassl.utils import (
     atomic_torch_save,
@@ -26,9 +30,12 @@ from slassl.utils import (
 )
 
 
-def main() -> None:
-    args = config_parser("Pretrain SLA-SSL").parse_args()
-    config = load_config(args.config, args.set)
+@hydra.main(
+    version_base="1.3",
+    config_path="../../../configs/pretrain",
+    config_name="prophesee_1mp",
+)
+def main(config: DictConfig) -> None:
     rank, world_size, local_rank = init_distributed()
     seed_everything(int(config.seed), rank)
     if not torch.cuda.is_available() and config.device == "cuda":
@@ -47,6 +54,7 @@ def main() -> None:
         projection_dim=int(config.model.projection_dim),
         small_stem=bool(config.model.small_stem),
         loss_config=config.loss,
+        model_config=config.model,
     ).to(device)
     if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[local_rank], broadcast_buffers=False)
@@ -66,6 +74,7 @@ def main() -> None:
     amp_enabled = bool(config.training.amp) and device.type == "cuda"
     scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     output_dir = Path(config.output_dir)
+    writer = create_summary_writer(config, output_dir) if is_main_process() else None
     start_epoch, global_step = 0, 0
     resume = config.training.get("resume")
     if resume:
@@ -80,7 +89,9 @@ def main() -> None:
     if is_main_process():
         output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "resolved_config.json").open("w", encoding="utf-8") as handle:
-            json.dump(config, handle, indent=2)
+            json.dump(resolved_config(config), handle, indent=2)
+        if writer is not None:
+            writer.add_text("config", f"```yaml\n{OmegaConf.to_yaml(config, resolve=True)}\n```")
 
     try:
         for epoch in range(start_epoch, int(config.training.epochs)):
@@ -98,7 +109,9 @@ def main() -> None:
                 scaler.scale(losses["loss"]).backward()
                 if float(config.training.gradient_clip_norm) > 0:
                     scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.gradient_clip_norm)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), config.training.gradient_clip_norm
+                    )
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
@@ -120,6 +133,7 @@ def main() -> None:
                         **{key: float(value.item()) for key, value in losses.items()},
                     }
                     append_metrics(output_dir / "metrics.jsonl", metrics)
+                    log_tensorboard_scalars(writer, "train", metrics, global_step)
                     progress.set_postfix(loss=f"{metrics['loss']:.4f}")
 
             if is_main_process() and (
@@ -133,11 +147,13 @@ def main() -> None:
                     "scaler": scaler.state_dict(),
                     "epoch": epoch,
                     "global_step": global_step,
-                    "config": dict(config),
+                    "config": resolved_config(config),
                 }
                 atomic_torch_save(state, output_dir / f"checkpoint_{epoch + 1:04d}.pt")
                 atomic_torch_save(state, output_dir / "checkpoint_last.pt")
     finally:
+        if writer is not None:
+            writer.close()
         cleanup_distributed()
 
 

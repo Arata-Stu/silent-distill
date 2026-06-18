@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import math
+import numbers
 from pathlib import Path
 from typing import Any
 
 import torch
+from omegaconf import DictConfig, OmegaConf
 from torch.optim import Optimizer
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader, Dataset, DistributedSampler
+from torch.utils.tensorboard import SummaryWriter
 
-from slassl.data import EventWindowDataset, event_collate
+from slassl.data import EventSequenceDataset, EventWindowDataset, event_collate
 
 
 def build_dataset(
@@ -16,9 +19,9 @@ def build_dataset(
     task: str,
     manifest: str | None = None,
     augmentation: bool = True,
-) -> EventWindowDataset:
+) -> Dataset:
     data = config.data
-    return EventWindowDataset(
+    dataset = EventWindowDataset(
         manifest=manifest or data.manifest,
         data_root=data.root,
         height=int(data.height),
@@ -51,10 +54,20 @@ def build_dataset(
         ],
         detection_min_box_diagonal=float(data.get("detection_min_box_diagonal", 0.0)),
     )
+    sequence_length = int(data.get("sequence_length", 1))
+    if sequence_length == 1:
+        return dataset
+    return EventSequenceDataset(
+        dataset,
+        length=sequence_length,
+        step=int(data.get("sequence_step", 1)),
+        stride=int(data.get("sequence_stride", 1)),
+        max_gap_us=int(data.get("max_sequence_gap_us", 0)),
+    )
 
 
 def build_loader(
-    dataset: EventWindowDataset,
+    dataset: Dataset,
     config: Any,
     rank: int,
     world_size: int,
@@ -106,3 +119,42 @@ def append_metrics(path: str | Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def resolved_config(config: Any) -> dict[str, Any]:
+    if isinstance(config, DictConfig):
+        return OmegaConf.to_container(config, resolve=True)  # type: ignore[return-value]
+    return dict(config)
+
+
+def create_summary_writer(config: Any, output_dir: str | Path) -> SummaryWriter | None:
+    tensorboard = config.get("tensorboard", {})
+    if not bool(tensorboard.get("enabled", True)):
+        return None
+    log_dir = tensorboard.get("log_dir", str(Path(output_dir) / "tensorboard"))
+    return SummaryWriter(
+        log_dir=str(log_dir),
+        flush_secs=int(tensorboard.get("flush_secs", 30)),
+    )
+
+
+def log_tensorboard_scalars(
+    writer: SummaryWriter | None,
+    prefix: str,
+    payload: dict[str, Any],
+    step: int,
+) -> None:
+    if writer is None:
+        return
+
+    def visit(path: str, value: Any) -> None:
+        if torch.is_tensor(value) and value.numel() == 1:
+            writer.add_scalar(path, float(value.detach().item()), step)
+        elif isinstance(value, numbers.Number):
+            writer.add_scalar(path, float(value), step)
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                visit(f"{path}/{key}", item)
+
+    for key, value in payload.items():
+        visit(f"{prefix}/{key}", value)

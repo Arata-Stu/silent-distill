@@ -99,7 +99,10 @@ def evaluate_detection(
     counts = {group: 0 for group in metrics}
     elapsed_seconds = 0.0
     for batch in tqdm(loader, desc="evaluate detection"):
-        images = [voxel.flatten(0, 1).to(device) for voxel in batch["short"]]
+        short = batch["short"]
+        if short.ndim == 6:
+            short = short[:, -1]
+        images = [voxel.flatten(0, 1).to(device) for voxel in short]
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         started = time.perf_counter()

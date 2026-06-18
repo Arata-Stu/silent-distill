@@ -15,6 +15,9 @@
 - accumulation time、polarity、temporal bins、negative sampling の ablation
 - event-density 別 accuracy / COCO mAP
 - single GPU、`torchrun` DDP、AMP、resume、Slurm
+- Hydraによる日時・run name別の実験管理
+- TensorBoardへのtrain/validation metric記録
+- sequence loader、GRU/LSTM、plain ViT、multi-scale distillation
 
 すべての event window は `[t - tau, t]` から作り、future event は使用しません。推論時は
 student と short window だけを使用します。
@@ -78,9 +81,9 @@ sla-index-h5 --dataset mvsec --data-root /datasets/mvsec \
 ```
 
 ```bash
-sla-pretrain --config configs/pretrain/dsec.yaml
-sla-pretrain --config configs/pretrain/m3ed.yaml
-sla-pretrain --config configs/pretrain/mvsec.yaml
+sla-pretrain --config-name dsec
+sla-pretrain --config-name m3ed
+sla-pretrain --config-name mvsec
 ```
 
 対応するnative pathはDSECの`/events/*`、M3EDの`/prophesee/left/*`、MVSECの
@@ -117,45 +120,64 @@ sla-data-stats --config configs/eval/data_stats.yaml
 
 ```bash
 torchrun --standalone --nproc_per_node=4 -m slassl.cli.pretrain \
-  --config configs/pretrain/prophesee_1mp.yaml \
-  --set training.batch_size=2
+  --config-name prophesee_1mp \
+  training.batch_size=2
 ```
 
 続いて student encoder を 1 ms FCOS に移植し、評価します。
 
 ```bash
-sla-finetune --config configs/finetune/prophesee_1mp_detection.yaml
-sla-evaluate --config configs/eval/prophesee_1mp_detection.yaml
+sla-finetune --config-name prophesee_1mp_detection \
+  training.pretrained_checkpoint=/path/to/pretrain/checkpoint_last.pt
+sla-evaluate --config configs/eval/prophesee_1mp_detection.yaml \
+  --set checkpoint=/path/to/finetune/checkpoint_last.pt
 ```
 
 scratch 1 ms と scratch 5 ms は同じ fine-tuning 条件から作れます。
 
 ```bash
-sla-finetune --config configs/finetune/prophesee_1mp_detection.yaml \
-  --set training.pretrained_checkpoint=null \
-  --set output_dir=outputs/baseline/scratch_1ms
+sla-finetune --config-name prophesee_1mp_detection \
+  training.pretrained_checkpoint=null run_name=scratch_1ms
 
-sla-finetune --config configs/finetune/prophesee_1mp_detection.yaml \
-  --set training.pretrained_checkpoint=null \
-  --set data.short_window_us=5000 \
-  --set output_dir=outputs/baseline/scratch_5ms
+sla-finetune --config-name prophesee_1mp_detection \
+  training.pretrained_checkpoint=null data.short_window_us=5000 run_name=scratch_5ms
 ```
 
-`--set data.short_window_us=500` のような override で 0.5 / 1 / 2 / 5 / 10 ms curve を
+`data.short_window_us=500` のような Hydra override で 0.5 / 1 / 2 / 5 / 10 ms curve を
 作れます。一括実行は `bash scripts/run_accumulation_curve.sh`、loss component は
 `bash scripts/run_ablations.sh`、Slurm template は `scripts/slurm/` にあります。実験条件一覧は
 [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) にまとめています。
 
 ## 出力
 
-各 run は以下を `output_dir` に保存します。
+各runは既定で`outputs/train/YYYY-MM-DD/HH-MM-SS_run_name/`へ保存されます。`run_name`は
+Hydra overrideで変更できます。各runには以下が含まれます。
 
 - `resolved_config.json`: override 適用後の設定
 - `metrics.jsonl`: step ごとの学習指標
 - `validation_metrics.jsonl`: density subset を含む validation 指標
 - `checkpoint_XXXX.pt`, `checkpoint_last.pt`: optimizer / scaler / scheduler を含む checkpoint
+- `tensorboard/`: train loss、各S2L scale、LR、EMA momentum、validation metric
 
 評価 JSON には accumulation time と GPU forward の sample 当たり latency も記録されます。
+
+TensorBoardは複数runをまとめて起動できます。
+
+```bash
+tensorboard --logdir outputs/train
+```
+
+## Sequence、recurrent、ViT
+
+`data.sequence_length`を2以上にすると、同じrecording内の時間順windowを
+`[batch,time,polarity,bins,height,width]`として読み込みます。GRU/LSTMは単方向で、未来の
+windowを参照しません。ViT + GRU + multi-scale distillationの小規模設定は次で実行できます。
+
+```bash
+sla-pretrain --config-name control_vit_gru
+sla-finetune --config-name control_classification_vit_gru \
+  training.pretrained_checkpoint=/path/to/pretrain/checkpoint_last.pt
+```
 
 ## 実装上の判断
 

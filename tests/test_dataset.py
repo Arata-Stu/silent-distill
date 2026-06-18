@@ -3,7 +3,7 @@ import json
 import h5py
 import numpy as np
 
-from slassl.data.dataset import EventWindowDataset
+from slassl.data.dataset import EventSequenceDataset, EventWindowDataset
 
 
 def test_dataset_never_reads_future_events(tmp_path) -> None:
@@ -101,3 +101,29 @@ def test_detection_targets_are_read_directly_from_npy_slice(tmp_path) -> None:
     target = dataset[0]["target"]
     assert target["boxes"].tolist() == [[1.0, 2.0, 11.0, 22.0]]
     assert target["labels"].tolist() == [1]
+
+
+def test_sequence_dataset_groups_only_chronological_windows(tmp_path) -> None:
+    sequence = tmp_path / "sequence.h5"
+    with h5py.File(sequence, "w") as handle:
+        events = handle.create_group("events")
+        events.create_dataset("x", data=np.zeros(5, dtype=np.int64))
+        events.create_dataset("y", data=np.zeros(5, dtype=np.int64))
+        events.create_dataset("t", data=np.arange(1000, 6000, 1000))
+        events.create_dataset("p", data=np.ones(5, dtype=np.int64))
+    manifest = tmp_path / "manifest.jsonl"
+    records = [
+        {"sequence": "sequence.h5", "timestamp_us": timestamp}
+        for timestamp in (2000, 3000, 4000, 5000)
+    ]
+    manifest.write_text(
+        "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
+    )
+    windows = EventWindowDataset(
+        manifest, tmp_path, 2, 2, 1, 1000, 2000, task="ssl"
+    )
+    sequences = EventSequenceDataset(windows, length=3, max_gap_us=1000)
+    sample = sequences[0]
+    assert sample["short"].shape == (3, 2, 1, 2, 2)
+    assert sample["long"].shape == (3, 2, 1, 2, 2)
+    assert sample["timestamp_us"].tolist() == [2000, 3000, 4000]

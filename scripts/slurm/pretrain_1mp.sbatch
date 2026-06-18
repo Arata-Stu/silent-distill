@@ -13,6 +13,5 @@ cd "${SLURM_SUBMIT_DIR}"
 mkdir -p outputs/slurm
 source .venv/bin/activate
 torchrun --standalone --nproc_per_node=4 -m slassl.cli.pretrain \
-  --config configs/pretrain/prophesee_1mp.yaml \
-  --set training.batch_size=2
-
+  --config-name prophesee_1mp \
+  training.batch_size=2

@@ -35,25 +35,32 @@ mAP と入力窓長を保存します。SLA-SSL の主条件は 1 ms student / 5
 
 ```bash
 # student / teacher window
---set data.short_window_us=500 --set data.long_window_us=5000
---set data.short_window_us=1000 --set data.long_window_us=10000
+data.short_window_us=500 data.long_window_us=5000
+data.short_window_us=1000 data.long_window_us=10000
 
 # temporal bins and shuffled order
---set data.bins=1
---set data.bins=10
---set data.temporal_shuffle=true
+data.bins=1
+data.bins=10
+data.temporal_shuffle=true
 
 # polarity
---set data.use_polarity=false --set loss.lambda_polarity=0
+data.use_polarity=false loss.lambda_polarity=0
 
 # negative sampling
---set 'loss.negative_modes=[random]'
---set 'loss.negative_modes=[near]'
---set 'loss.negative_modes=[random,near,hard]'
+'loss.negative_modes=[random]'
+'loss.negative_modes=[near]'
+'loss.negative_modes=[random,near,hard]'
 ```
 
 shell が bracket を展開しないよう、list override は quote してください。polarity や bins を
 変えた pretraining checkpoint は同じ入力 channel 数の downstream config と組み合わせます。
+
+## Sequence, recurrent, and ViT
+
+`data.sequence_length > 1`では同一recordingの連続窓を`[N,T,C,B,H,W]`で返します。
+`model.recurrent=gru`または`lstm`で単方向recurrent layerを有効化できます。ViT + GRUの
+基準設定は`configs/pretrain/control_vit_gru.yaml`です。multi-scale distillationは既定で有効で、
+ResNetの各stageまたはViTの代表blockを`model.distillation_scales`で選択します。
 
 ## Density subsets
 
