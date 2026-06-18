@@ -1,7 +1,15 @@
 import h5py
 import numpy as np
+import pytest
 
 from slassl.data.h5_events import H5EventReader
+
+
+def test_missing_file_reports_the_path(tmp_path) -> None:
+    path = tmp_path / "missing.h5"
+
+    with pytest.raises(FileNotFoundError, match="Event HDF5 file not found:.*missing.h5"):
+        H5EventReader(path)
 
 
 def test_reads_dsec_split_layout_with_time_offset(tmp_path) -> None:

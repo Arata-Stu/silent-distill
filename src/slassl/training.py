@@ -92,6 +92,17 @@ def build_loader(
     return loader, sampler
 
 
+def gradient_accumulation_groups(
+    loader_batches: int, accumulation_steps: int
+) -> list[int]:
+    if loader_batches < 0 or accumulation_steps <= 0:
+        raise ValueError("Loader batches must be non-negative and accumulation steps positive")
+    return [
+        min(accumulation_steps, loader_batches - start)
+        for start in range(0, loader_batches, accumulation_steps)
+    ]
+
+
 def cosine_momentum(step: int, total_steps: int, start: float, end: float) -> float:
     if total_steps <= 1:
         return end

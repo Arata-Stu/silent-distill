@@ -63,3 +63,20 @@ def test_ssl_reports_multi_scale_distillation_losses() -> None:
     losses = model(short, long, occupancy)
     assert torch.isfinite(losses["loss"])
     assert {"loss_s2l_block1", "loss_s2l_block4"} <= set(losses)
+    expected_diagnostics = {
+        "diagnostics/student_std_feature_global",
+        "diagnostics/teacher_std_feature_global",
+        "diagnostics/student_std_projection_global",
+        "diagnostics/teacher_std_projection_global",
+        "diagnostics/student_normalized_std_projection_global",
+        "diagnostics/teacher_normalized_std_projection_global",
+        "diagnostics/student_pairwise_cosine_projection_global",
+        "diagnostics/teacher_pairwise_cosine_projection_global",
+        "diagnostics/cosine_projection_global",
+        "occupancy/predicted_rate",
+        "occupancy/target_rate",
+        "occupancy/positive_probability",
+        "occupancy/negative_probability",
+    }
+    assert expected_diagnostics <= set(losses)
+    assert all(torch.isfinite(losses[key]) for key in expected_diagnostics)

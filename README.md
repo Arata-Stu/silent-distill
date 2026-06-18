@@ -173,7 +173,7 @@ Hydra overrideで変更できます。各runには以下が含まれます。
 - `metrics.jsonl`: step ごとの学習指標
 - `validation_metrics.jsonl`: density subset を含む validation 指標
 - `checkpoint_XXXX.pt`, `checkpoint_last.pt`: optimizer / scaler / scheduler を含む checkpoint
-- `tensorboard/`: train loss、各S2L scale、LR、EMA momentum、validation metric
+- `tensorboard/`: train loss、各S2L scale、LR、EMA momentum、表現崩壊診断、validation metric
 
 評価 JSON には accumulation time と GPU forward の sample 当たり latency も記録されます。
 
@@ -182,6 +182,29 @@ TensorBoardは複数runをまとめて起動できます。
 ```bash
 tensorboard --logdir outputs/train
 ```
+
+SSL pretrainingでは`train/diagnostics/*`にstudent/teacherのfeature・projection標準偏差、
+L2正規化後の標準偏差、norm、student-teacher cosine、sample間cosineを記録します。標準偏差と
+sample間cosineはbatch内のsample方向で計算するため、崩壊判定にはbatch size 2以上を使用し、
+単一stepではなく推移を確認してください。`train/occupancy/*`には予測/target event率と
+positive/negative probability、`train/optimization/*`にはgradient normとAMP scale、
+`train/data/event_density`には入力event密度を記録します。
+
+高解像度入力ではgradient accumulationでGPUへ載せるbatchを小さくできます。
+`training.batch_size`は1回のforwardに使うmicro batch、
+`training.gradient_accumulation_steps`は1回のoptimizer更新までに蓄積する回数です。
+
+```bash
+sla-pretrain --config-name m3ed \
+  training.batch_size=2 \
+  training.gradient_accumulation_steps=8
+```
+
+この例のeffective batch sizeは1 GPUで16、DistributedDataParallelでは`16 * world_size`です。
+LR scheduler、EMA teacher、global step、`training.log_every`はoptimizer更新単位で進みます。
+勾配は同等でもBatchNormの統計はmicro batch単位で計算されるため、物理batch 16との数値的な
+完全一致は保証されません。TensorBoardの`train/optimization/effective_batch_size`と
+`train/optimization/micro_batches_per_update`で実際の更新単位を確認できます。
 
 ## Sequence、recurrent、ViT
 

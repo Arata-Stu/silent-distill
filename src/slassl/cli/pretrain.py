@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import hydra
@@ -18,6 +19,7 @@ from slassl.training import (
     cosine_momentum,
     cosine_warmup_scheduler,
     create_summary_writer,
+    gradient_accumulation_groups,
     log_tensorboard_scalars,
     resolved_config,
 )
@@ -65,11 +67,16 @@ def main(config: DictConfig) -> None:
         lr=float(config.training.learning_rate),
         weight_decay=float(config.training.weight_decay),
     )
-    total_steps = int(config.training.epochs) * len(loader)
+    accumulation_steps = int(config.training.get("gradient_accumulation_steps", 1))
+    accumulation_groups = gradient_accumulation_groups(len(loader), accumulation_steps)
+    if not accumulation_groups:
+        raise ValueError("Training loader is empty; reduce training.batch_size or add samples")
+    updates_per_epoch = len(accumulation_groups)
+    total_steps = int(config.training.epochs) * updates_per_epoch
     scheduler = cosine_warmup_scheduler(
         optimizer,
         total_steps,
-        int(config.training.warmup_epochs) * len(loader),
+        int(config.training.warmup_epochs) * updates_per_epoch,
         float(config.training.minimum_lr) / float(config.training.learning_rate),
     )
     amp_enabled = bool(config.training.amp) and device.type == "cuda"
@@ -100,19 +107,70 @@ def main(config: DictConfig) -> None:
                 sampler.set_epoch(epoch)
             model.train()
             progress = tqdm(loader, disable=not is_main_process(), desc=f"pretrain {epoch + 1}")
-            for batch in progress:
+            optimizer.zero_grad(set_to_none=True)
+            accumulated_metrics: dict[str, torch.Tensor] = {}
+            accumulated_metric_counts: dict[str, int] = {}
+            accumulated_samples = 0
+            for batch_index, batch in enumerate(progress):
+                group_index = batch_index // accumulation_steps
+                group_start = group_index * accumulation_steps
+                group_size = accumulation_groups[group_index]
+                should_update = batch_index - group_start + 1 == group_size
+                should_log_update = (
+                    is_main_process()
+                    and (global_step + 1) % int(config.training.log_every) == 0
+                )
                 short = batch["short"].to(device, non_blocking=True)
                 long = batch["long"].to(device, non_blocking=True)
                 occupancy = batch["occupancy"].to(device, non_blocking=True)
-                optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                    losses = model(short, long, occupancy)
-                scaler.scale(losses["loss"]).backward()
-                if float(config.training.gradient_clip_norm) > 0:
-                    scaler.unscale_(optimizer)
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), config.training.gradient_clip_norm
+                synchronization = (
+                    model.no_sync()
+                    if isinstance(model, DistributedDataParallel) and not should_update
+                    else nullcontext()
+                )
+                with synchronization:
+                    with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                        losses = model(short, long, occupancy)
+                        scaled_loss = losses["loss"] / group_size
+                    scaler.scale(scaled_loss).backward()
+
+                if should_log_update:
+                    for key, value in losses.items():
+                        accumulated_metrics[key] = accumulated_metrics.get(
+                            key, torch.zeros_like(value.detach(), dtype=torch.float32)
+                        ) + value.detach().float()
+                        accumulated_metric_counts[key] = (
+                            accumulated_metric_counts.get(key, 0) + 1
+                        )
+                    density_key = "data/event_density"
+                    density = batch["density"].detach().float().mean()
+                    accumulated_metrics[density_key] = accumulated_metrics.get(
+                        density_key, torch.zeros_like(density)
+                    ) + density
+                    accumulated_metric_counts[density_key] = (
+                        accumulated_metric_counts.get(density_key, 0) + 1
                     )
+                accumulated_samples += int(short.shape[0])
+                if not should_update:
+                    continue
+
+                scaler.unscale_(optimizer)
+                gradient_clip_norm = float(config.training.gradient_clip_norm)
+                gradients = [
+                    parameter.grad.detach()
+                    for parameter in model.parameters()
+                    if parameter.grad is not None
+                ]
+                if gradient_clip_norm > 0:
+                    gradient_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), gradient_clip_norm
+                    )
+                elif gradients:
+                    gradient_norm = torch.linalg.vector_norm(
+                        torch.stack([gradient.norm(2) for gradient in gradients])
+                    )
+                else:
+                    gradient_norm = torch.zeros((), device=device)
                 scaler.step(optimizer)
                 scaler.update()
                 scheduler.step()
@@ -126,16 +184,28 @@ def main(config: DictConfig) -> None:
                 global_step += 1
 
                 if is_main_process() and global_step % int(config.training.log_every) == 0:
+                    averaged_metrics = {
+                        key: float((value / accumulated_metric_counts[key]).item())
+                        for key, value in accumulated_metrics.items()
+                    }
                     metrics = {
                         "epoch": epoch,
                         "step": global_step,
                         "lr": scheduler.get_last_lr()[0],
                         "ema_momentum": momentum,
-                        **{key: float(value.item()) for key, value in losses.items()},
+                        "optimization/gradient_norm": float(gradient_norm.item()),
+                        "optimization/amp_scale": float(scaler.get_scale()),
+                        "optimization/micro_batches_per_update": group_size,
+                        "optimization/effective_batch_size": accumulated_samples * world_size,
+                        **averaged_metrics,
                     }
                     append_metrics(output_dir / "metrics.jsonl", metrics)
                     log_tensorboard_scalars(writer, "train", metrics, global_step)
                     progress.set_postfix(loss=f"{metrics['loss']:.4f}")
+                optimizer.zero_grad(set_to_none=True)
+                accumulated_metrics.clear()
+                accumulated_metric_counts.clear()
+                accumulated_samples = 0
 
             if is_main_process() and (
                 (epoch + 1) % int(config.training.save_every_epochs) == 0

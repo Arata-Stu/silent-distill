@@ -30,6 +30,40 @@ class ProjectionHead(nn.Module):
         return self.layers(x)
 
 
+@torch.no_grad()
+def _paired_representation_stats(
+    student: torch.Tensor, teacher: torch.Tensor, name: str
+) -> dict[str, torch.Tensor]:
+    student = student.detach().float().reshape(-1, student.shape[-1])
+    teacher = teacher.detach().float().reshape(-1, teacher.shape[-1])
+    normalized_student = F.normalize(student, dim=-1)
+    normalized_teacher = F.normalize(teacher, dim=-1)
+    stats = {
+        f"diagnostics/student_std_{name}": student.std(dim=0, unbiased=False).mean(),
+        f"diagnostics/teacher_std_{name}": teacher.std(dim=0, unbiased=False).mean(),
+        f"diagnostics/student_normalized_std_{name}": normalized_student.std(
+            dim=0, unbiased=False
+        ).mean(),
+        f"diagnostics/teacher_normalized_std_{name}": normalized_teacher.std(
+            dim=0, unbiased=False
+        ).mean(),
+        f"diagnostics/student_norm_{name}": student.norm(dim=-1).mean(),
+        f"diagnostics/teacher_norm_{name}": teacher.norm(dim=-1).mean(),
+        f"diagnostics/cosine_{name}": F.cosine_similarity(student, teacher, dim=-1).mean(),
+    }
+    if len(student) > 1:
+        student_similarity = normalized_student @ normalized_student.T
+        teacher_similarity = normalized_teacher @ normalized_teacher.T
+        pairs = len(student) * (len(student) - 1)
+        stats[f"diagnostics/student_pairwise_cosine_{name}"] = (
+            student_similarity.sum() - student_similarity.diagonal().sum()
+        ) / pairs
+        stats[f"diagnostics/teacher_pairwise_cosine_{name}"] = (
+            teacher_similarity.sum() - teacher_similarity.diagonal().sum()
+        ) / pairs
+    return stats
+
+
 class OccupancyHead(nn.Module):
     def __init__(self, feature_channels: int, output_channels: int) -> None:
         super().__init__()
@@ -139,6 +173,14 @@ class SLASSLModel(nn.Module):
             teacher_maps, teacher_feature = self.teacher_encoder(long)
             teacher_projection = self.teacher_projector(teacher_feature)
 
+        diagnostics = _paired_representation_stats(
+            student_feature, teacher_feature, "feature_global"
+        )
+        diagnostics.update(
+            _paired_representation_stats(
+                student_projection, teacher_projection, "projection_global"
+            )
+        )
         distillation_losses = {
             "global": normalized_distillation_loss(student_projection, teacher_projection)
         }
@@ -150,6 +192,11 @@ class SLASSLModel(nn.Module):
                 teacher_scale = self.teacher_scale_projectors[name](teacher_scale)
             distillation_losses[name] = normalized_distillation_loss(
                 student_scale, teacher_scale
+            )
+            diagnostics.update(
+                _paired_representation_stats(
+                    student_scale, teacher_scale, f"projection_{name}"
+                )
             )
         s2l = torch.stack(list(distillation_losses.values())).mean()
 
@@ -179,6 +226,12 @@ class SLASSLModel(nn.Module):
         silence, sampling_stats = self.silence_loss(flat_logits, flat_occupancy)
         polarity = polarity_loss(flat_logits, flat_occupancy)
         rate = event_rate_loss(flat_logits, flat_occupancy)
+        with torch.no_grad():
+            probabilities = flat_logits.detach().float().sigmoid()
+            occupancy_stats = {
+                "occupancy/predicted_rate": probabilities.mean(),
+                "occupancy/target_rate": flat_occupancy.detach().float().mean(),
+            }
         total = (
             self.lambda_s2l * s2l
             + self.lambda_silence * silence
@@ -196,6 +249,8 @@ class SLASSLModel(nn.Module):
                 for name, value in distillation_losses.items()
             },
             **sampling_stats,
+            **occupancy_stats,
+            **diagnostics,
         }
 
     @torch.no_grad()

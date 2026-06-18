@@ -109,9 +109,18 @@ class SilenceAwareLoss(nn.Module):
             else logits.sum() * 0
         )
         loss = positive_loss + self.negative_weight * negative_loss
+        probabilities = logits.detach().float().sigmoid()
         stats = {
             "positive_bins": positive.sum().detach(),
             "negative_bins": selected_negative.sum().detach(),
+            "occupancy/positive_probability": (
+                probabilities[positive].mean() if positive.any() else probabilities.new_zeros(())
+            ),
+            "occupancy/negative_probability": (
+                probabilities[selected_negative].mean()
+                if selected_negative.any()
+                else probabilities.new_zeros(())
+            ),
         }
         return loss, stats
 

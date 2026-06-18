@@ -58,6 +58,7 @@ loss:
 training:
   epochs: 100
   batch_size: 16
+  gradient_accumulation_steps: 1
   num_workers: 8
   learning_rate: 0.0002
   minimum_lr: 0.000002

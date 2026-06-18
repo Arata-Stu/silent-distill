@@ -65,10 +65,15 @@ class H5EventReader:
         self.path = Path(path)
         try:
             self.handle = h5py.File(self.path, "r")
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(f"Event HDF5 file not found: {self.path}") from exc
+        except PermissionError as exc:
+            raise PermissionError(f"Permission denied while opening {self.path}") from exc
         except OSError as exc:
             raise OSError(
-                f"Could not open {self.path}. DSEC requires the hdf5plugin package; "
-                "Metavision ECF-compressed HDF5 is intentionally unsupported."
+                f"Could not open event HDF5 file {self.path}. The file may be invalid or "
+                "use an unsupported compression filter. DSEC Blosc compression requires "
+                "the hdf5plugin package; Metavision ECF compression is unsupported."
             ) from exc
         self.camera = camera
         self.native_index_path: str | None = None
