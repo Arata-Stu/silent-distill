@@ -11,6 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
+from slassl.config import hydra_config_path
 from slassl.evaluation import evaluate_classification, evaluate_detection
 from slassl.models import ClassificationModel, build_detector
 from slassl.models.downstream import load_pretrained_encoder
@@ -90,7 +91,7 @@ def _validation(model: torch.nn.Module, loader: Any, config: Any, device: torch.
 
 @hydra.main(
     version_base="1.3",
-    config_path="../../../configs/finetune",
+    config_path=hydra_config_path("finetune"),
     config_name="prophesee_1mp_detection",
 )
 def main(config: DictConfig) -> None:

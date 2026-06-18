@@ -9,6 +9,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
+from slassl.config import hydra_config_path
 from slassl.models import SLASSLModel
 from slassl.training import (
     append_metrics,
@@ -32,7 +33,7 @@ from slassl.utils import (
 
 @hydra.main(
     version_base="1.3",
-    config_path="../../../configs/pretrain",
+    config_path=hydra_config_path("pretrain"),
     config_name="prophesee_1mp",
 )
 def main(config: DictConfig) -> None:

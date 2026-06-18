@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import argparse
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+
+def hydra_config_path(group: str) -> str:
+    """Resolve Hydra configs as files, not as a Python config module."""
+    candidates = []
+    if config_root := os.environ.get("SLASSL_CONFIG_ROOT"):
+        candidates.append(Path(config_root).expanduser() / group)
+    candidates.extend(
+        (
+            Path(__file__).resolve().parents[2] / "configs" / group,
+            Path.cwd() / "configs" / group,
+        )
+    )
+    for candidate in candidates:
+        if candidate.is_dir():
+            return str(candidate.resolve())
+    searched = ", ".join(str(path) for path in candidates)
+    raise FileNotFoundError(
+        f"Could not locate Hydra config group '{group}'. Searched: {searched}. "
+        "Set SLASSL_CONFIG_ROOT to the repository's configs directory."
+    )
 
 
 class Config(dict):
@@ -62,4 +84,3 @@ def config_parser(description: str) -> argparse.ArgumentParser:
         help="Override a nested config value; may be repeated",
     )
     return parser
-
