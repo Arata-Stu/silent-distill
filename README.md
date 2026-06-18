@@ -55,7 +55,8 @@ for SPLIT in train val test; do
   sla-index-h5 --dataset 1mpx \
     --data-root /datasets/prophesee_1mpx \
     --output-dir /datasets/prophesee_1mpx/manifests \
-    --split "$SPLIT" --class-ids 0,1,2
+    --split "$SPLIT" --class-ids 0,1,2 \
+    --long-window-us 50000
 done
 ```
 
@@ -71,13 +72,16 @@ bboxのraw class `0,1,2`はFCOS label `1,2,3`に連続化されます。公式1 
 
 ```bash
 sla-index-h5 --dataset dsec --data-root /datasets/dsec \
-  --search-root /datasets/dsec/train --output-dir /datasets/dsec/manifests --split train
+  --search-root /datasets/dsec/train --output-dir /datasets/dsec/manifests --split train \
+  --long-window-us 50000
 
 sla-index-h5 --dataset m3ed --data-root /datasets/m3ed \
-  --search-root /datasets/m3ed/train --output-dir /datasets/m3ed/manifests --split train
+  --search-root /datasets/m3ed/train --output-dir /datasets/m3ed/manifests --split train \
+  --long-window-us 50000
 
 sla-index-h5 --dataset mvsec --data-root /datasets/mvsec \
-  --search-root /datasets/mvsec/train --output-dir /datasets/mvsec/manifests --split train
+  --search-root /datasets/mvsec/train --output-dir /datasets/mvsec/manifests --split train \
+  --long-window-us 50000
 ```
 
 ```bash
@@ -85,6 +89,10 @@ sla-pretrain --config-name dsec
 sla-pretrain --config-name m3ed
 sla-pretrain --config-name mvsec
 ```
+
+pretrainingの共通defaultはstudent側`data.short_window_us=10000`（10 ms）、teacher側
+`data.long_window_us=50000`（50 ms）です。manifest生成時も`--long-window-us 50000`を指定し、
+各sequence先頭でlong windowが欠けるsampleを除外します。
 
 対応するnative pathはDSECの`/events/*`、M3EDの`/prophesee/left/*`、MVSECの
 `/davis/left/events`です。right cameraはindex時の`--camera right`とconfigの

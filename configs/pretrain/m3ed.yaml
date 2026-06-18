@@ -18,8 +18,8 @@ data:
   height: 720
   width: 1280
   bins: 5
-  short_window_us: 1000
-  long_window_us: 5000
+  short_window_us: 10000
+  long_window_us: 50000
   use_polarity: true
   representation: count
   occupancy_stride: 8
