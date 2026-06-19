@@ -137,7 +137,17 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--timestamp-offset-us", type=float)
     result.add_argument("--sample-period-us", type=int, default=5000)
     result.add_argument("--long-window-us", type=int, default=5000)
-    result.add_argument("--bbox-root", type=Path, help="1 Mpx annotation root; defaults to search root")
+    result.add_argument("--start-fraction", type=float, default=0.0)
+    result.add_argument("--end-fraction", type=float, default=1.0)
+    result.add_argument(
+        "--boundary-margin-us",
+        type=int,
+        default=0,
+        help="Exclude this duration next to each interior temporal split boundary",
+    )
+    result.add_argument(
+        "--bbox-root", type=Path, help="1 Mpx annotation root; defaults to search root"
+    )
     result.add_argument("--class-ids", default="0,1,2")
     result.add_argument(
         "--official-1mpx-filter", action=argparse.BooleanOptionalAction, default=True
@@ -147,6 +157,12 @@ def parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = parser().parse_args()
+    if args.sample_period_us <= 0 or args.long_window_us <= 0:
+        raise ValueError("sample-period-us and long-window-us must be positive")
+    if not 0.0 <= args.start_fraction < args.end_fraction <= 1.0:
+        raise ValueError("Require 0 <= start-fraction < end-fraction <= 1")
+    if args.boundary_margin_us < 0:
+        raise ValueError("boundary-margin-us must be non-negative")
     data_root = args.data_root.resolve()
     search_root = (args.search_root or (args.data_root / args.split)).resolve()
     files = _discover_files(args.dataset, search_root, args.camera, args.file_glob)
@@ -181,13 +197,27 @@ def main() -> None:
                 continue  # Ignore depth, semantic, and calibration HDF5 files.
             raise RuntimeError(f"Failed to index {path}: {exc}") from exc
         first, last = description["first_timestamp_us"], description["last_timestamp_us"]
+        duration_us = last - first
+        selected_start = first + round(duration_us * args.start_fraction)
+        selected_end = first + round(duration_us * args.end_fraction)
+        if args.start_fraction > 0:
+            selected_start += args.boundary_margin_us
+        if args.end_fraction < 1:
+            selected_end -= args.boundary_margin_us
+        first_complete_window = selected_start + args.long_window_us
+        if first_complete_window > selected_end:
+            raise ValueError(
+                f"Temporal selection for {path} is shorter than long-window-us"
+            )
         timestamp_index = _timestamp_index_for(path, data_root)
         timestamp_index_relative = (
             str(timestamp_index.resolve().relative_to(data_root))
             if timestamp_index is not None
             else None
         )
-        for timestamp in range(first + args.long_window_us, last + 1, args.sample_period_us):
+        for timestamp in range(
+            first_complete_window, selected_end + 1, args.sample_period_us
+        ):
             record = {
                 "sequence": relative,
                 "timestamp_us": timestamp,
@@ -198,6 +228,7 @@ def main() -> None:
                 record["timestamp_index_period_us"] = 20
             ssl_records.append(record)
         description["path"] = relative
+        description["selected_range_us"] = [selected_start, selected_end]
         sequence_metadata.append(description)
 
         bbox_path = annotations.get(_normalized_stem(path))
@@ -216,6 +247,11 @@ def main() -> None:
                 first,
                 args.official_1mpx_filter,
             )
+            sequence_detection_records = [
+                record
+                for record in sequence_detection_records
+                if selected_start <= int(record["timestamp_us"]) <= selected_end
+            ]
             if timestamp_index_relative is not None:
                 for record in sequence_detection_records:
                     record["timestamp_index"] = timestamp_index_relative
@@ -237,6 +273,9 @@ def main() -> None:
         "split": args.split,
         "data_root": str(data_root),
         "camera": args.camera,
+        "start_fraction": args.start_fraction,
+        "end_fraction": args.end_fraction,
+        "boundary_margin_us": args.boundary_margin_us,
         "sequences": sequence_metadata,
         "ssl_samples": len(ssl_records),
         "detection_samples": len(detection_records),

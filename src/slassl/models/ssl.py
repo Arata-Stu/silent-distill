@@ -80,6 +80,112 @@ class OccupancyHead(nn.Module):
         return F.interpolate(logits, size=output_size, mode="bilinear", align_corners=False)
 
 
+class ReconstructionHead(nn.Module):
+    def __init__(self, feature_channels: int, output_channels: int) -> None:
+        super().__init__()
+        hidden = max(feature_channels // 4, 128)
+        self.layers = nn.Sequential(
+            nn.Conv2d(feature_channels, hidden, 3, padding=1),
+            nn.GroupNorm(8, hidden),
+            nn.GELU(),
+            nn.Conv2d(hidden, output_channels, 1),
+        )
+
+    def forward(self, x: torch.Tensor, output_size: tuple[int, int]) -> torch.Tensor:
+        reconstruction = self.layers(x)
+        return F.interpolate(
+            reconstruction, size=output_size, mode="bilinear", align_corners=False
+        )
+
+
+@torch.no_grad()
+def _student_representation_stats(
+    feature: torch.Tensor, name: str
+) -> dict[str, torch.Tensor]:
+    feature = feature.detach().float().reshape(-1, feature.shape[-1])
+    normalized = F.normalize(feature, dim=-1)
+    stats = {
+        f"diagnostics/student_std_{name}": feature.std(dim=0, unbiased=False).mean(),
+        f"diagnostics/student_normalized_std_{name}": normalized.std(
+            dim=0, unbiased=False
+        ).mean(),
+        f"diagnostics/student_norm_{name}": feature.norm(dim=-1).mean(),
+    }
+    if len(feature) > 1:
+        similarity = normalized @ normalized.T
+        pairs = len(feature) * (len(feature) - 1)
+        stats[f"diagnostics/student_pairwise_cosine_{name}"] = (
+            similarity.sum() - similarity.diagonal().sum()
+        ) / pairs
+    return stats
+
+
+class EventAutoEncoderModel(nn.Module):
+    """Reconstruct the short event voxel while exposing the same downstream encoder key."""
+
+    def __init__(
+        self,
+        backbone: str,
+        input_channels: int,
+        small_stem: bool,
+        model_config: Any | None = None,
+    ) -> None:
+        super().__init__()
+        model_config = model_config or {}
+        self.student_encoder = TemporalEncoder(
+            backbone, input_channels, small_stem, model_config=model_config
+        )
+        self.reconstruction_head = ReconstructionHead(
+            self.student_encoder.feature_dims[-1], input_channels
+        )
+        self.target_transform = str(
+            model_config.get("autoencoder_target_transform", "log_count")
+        )
+        if self.target_transform not in {"count", "log_count"}:
+            raise ValueError(
+                "model.autoencoder_target_transform must be count or log_count"
+            )
+
+    def forward(
+        self,
+        short: torch.Tensor,
+        long: torch.Tensor | None = None,
+        occupancy: torch.Tensor | None = None,
+    ) -> dict[str, torch.Tensor]:
+        del long, occupancy
+        sequence = short.unsqueeze(1) if short.ndim == 5 else short
+        if sequence.ndim != 6:
+            raise ValueError(f"Expected event voxel sequence, received {sequence.shape}")
+        maps, feature = self.student_encoder(sequence)
+        batch, timesteps = sequence.shape[:2]
+        deepest = maps[-1]
+        prediction = self.reconstruction_head(
+            deepest.reshape(batch * timesteps, *deepest.shape[2:]), sequence.shape[-2:]
+        ).reshape(batch, timesteps, -1, *sequence.shape[-2:])
+        target = sequence.flatten(2, 3).float()
+        if self.target_transform == "log_count":
+            target = torch.log1p(target)
+        reconstruction = F.smooth_l1_loss(prediction, target)
+        with torch.no_grad():
+            error = prediction.detach().float() - target.detach().float()
+            stats = {
+                "reconstruction/mae": error.abs().mean(),
+                "reconstruction/rmse": error.square().mean().sqrt(),
+                "reconstruction/target_mean": target.detach().float().mean(),
+                "reconstruction/prediction_mean": prediction.detach().float().mean(),
+            }
+        return {
+            "loss": reconstruction,
+            "loss_reconstruction": reconstruction.detach(),
+            **stats,
+            **_student_representation_stats(feature, "feature_global"),
+        }
+
+    @torch.no_grad()
+    def update_teacher(self, momentum: float) -> None:
+        del momentum
+
+
 class SLASSLModel(nn.Module):
     def __init__(
         self,

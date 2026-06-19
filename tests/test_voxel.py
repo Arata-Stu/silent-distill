@@ -33,3 +33,15 @@ def test_occupancy_uses_spatial_stride() -> None:
     assert target.shape == (1, 1, 2, 2)
     assert target[0, 0, 1, 1] == 1
 
+
+def test_voxel_rounds_fractional_rectified_coordinates() -> None:
+    voxelizer = EventVoxelizer(height=3, width=3, bins=1, use_polarity=False)
+    voxel = voxelizer(
+        np.array([0.6]),
+        np.array([1.6]),
+        np.array([10]),
+        np.array([1]),
+        0,
+        10,
+    )
+    assert voxel[0, 0, 2, 1] == 1

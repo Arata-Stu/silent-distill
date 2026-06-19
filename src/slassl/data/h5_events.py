@@ -256,9 +256,12 @@ class H5EventReader:
         end_us: int,
         index_map: np.ndarray | None = None,
         index_period_us: int = 20,
+        end_inclusive: bool = True,
     ) -> tuple[np.ndarray, ...]:
         left = self.searchsorted_us(start_us, "left", index_map, index_period_us)
-        right = self.searchsorted_us(end_us, "right", index_map, index_period_us)
+        right = self.searchsorted_us(
+            end_us, "right" if end_inclusive else "left", index_map, index_period_us
+        )
         return self.read_index_slice(left, right)
 
     def close(self) -> None:

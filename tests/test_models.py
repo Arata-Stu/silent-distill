@@ -1,7 +1,7 @@
 import torch
 
 from slassl.models.encoder import TemporalEncoder
-from slassl.models.ssl import SLASSLModel
+from slassl.models.ssl import EventAutoEncoderModel, SLASSLModel
 
 
 class LossConfig(dict):
@@ -80,3 +80,21 @@ def test_ssl_reports_multi_scale_distillation_losses() -> None:
     }
     assert expected_diagnostics <= set(losses)
     assert all(torch.isfinite(losses[key]) for key in expected_diagnostics)
+
+
+def test_event_autoencoder_reconstructs_short_voxel() -> None:
+    config = {
+        "vit_patch_size": 4,
+        "vit_embed_dim": 64,
+        "vit_depth": 4,
+        "vit_num_heads": 4,
+        "recurrent": "none",
+        "autoencoder_target_transform": "log_count",
+    }
+    model = EventAutoEncoderModel("vit_tiny", 4, False, config)
+    short = torch.rand(2, 2, 2, 16, 20)
+    losses = model(short)
+    assert torch.isfinite(losses["loss"])
+    assert losses["loss"].requires_grad
+    assert "loss_reconstruction" in losses
+    assert "diagnostics/student_std_feature_global" in losses

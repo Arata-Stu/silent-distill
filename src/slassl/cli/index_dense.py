@@ -222,6 +222,7 @@ def main() -> None:
                 "sequence": data_relative,
                 "timestamp_us": timestamp_us,
                 "sample_id": f"{data_path.stem}:{args.task}:{target_index}",
+                "metric_sequence": data_path.stem.removesuffix("_data"),
                 "target": target_relative,
                 "target_index": target_index,
                 "target_format": target_format,

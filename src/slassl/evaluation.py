@@ -136,6 +136,25 @@ def _dense_groups() -> tuple[str, ...]:
     return ("all", "low", "medium", "high")
 
 
+def _flow_metric_sums() -> dict[str, float]:
+    return {key: 0.0 for key in ("epe", "1pe", "2pe", "3pe", "angle")}
+
+
+def _flow_metric_summary(
+    sums: dict[str, float], valid_pixels: int, samples: int
+) -> dict[str, Any]:
+    count = max(valid_pixels, 1)
+    return {
+        "aepe": sums["epe"] / count,
+        "1pe": 100.0 * sums["1pe"] / count,
+        "2pe": 100.0 * sums["2pe"] / count,
+        "3pe": 100.0 * sums["3pe"] / count,
+        "aae_degrees": sums["angle"] / count,
+        "valid_pixels": valid_pixels,
+        "samples": samples,
+    }
+
+
 @torch.inference_mode()
 def evaluate_flow(
     model: torch.nn.Module,
@@ -146,12 +165,12 @@ def evaluate_flow(
 ) -> dict[str, Any]:
     model.eval()
     groups = _dense_groups()
-    sums = {
-        group: {key: 0.0 for key in ("epe", "1pe", "2pe", "3pe", "angle")}
-        for group in groups
-    }
+    sums = {group: _flow_metric_sums() for group in groups}
     valid_pixels = {group: 0 for group in groups}
     samples = {group: 0 for group in groups}
+    sequence_sums: dict[str, dict[str, float]] = {}
+    sequence_valid_pixels: dict[str, int] = {}
+    sequence_samples: dict[str, int] = {}
     elapsed_seconds = 0.0
     total_samples = 0
     for batch in tqdm(loader, desc="evaluate optical flow"):
@@ -166,8 +185,14 @@ def evaluate_flow(
             torch.cuda.synchronize(device)
         elapsed_seconds += time.perf_counter() - started
         total_samples += len(inputs)
-        for prediction, target, valid, density in zip(
-            predictions, targets, valid_masks, batch["density"], strict=True
+        metric_sequences = batch.get("metric_sequence", [None] * len(inputs))
+        for prediction, target, valid, density, metric_sequence in zip(
+            predictions,
+            targets,
+            valid_masks,
+            batch["density"],
+            metric_sequences,
+            strict=True,
         ):
             count = int(valid.sum().item())
             if not count:
@@ -192,18 +217,44 @@ def evaluate_flow(
                 sums[selected_group]["angle"] += float(angle.sum().item())
                 valid_pixels[selected_group] += count
                 samples[selected_group] += 1
-    output: dict[str, Any] = {}
-    for group in groups:
-        count = max(valid_pixels[group], 1)
-        output[group] = {
-            "aepe": sums[group]["epe"] / count,
-            "1pe": 100.0 * sums[group]["1pe"] / count,
-            "2pe": 100.0 * sums[group]["2pe"] / count,
-            "3pe": 100.0 * sums[group]["3pe"] / count,
-            "aae_degrees": sums[group]["angle"] / count,
-            "valid_pixels": valid_pixels[group],
-            "samples": samples[group],
+            if metric_sequence is not None:
+                sequence = str(metric_sequence)
+                sequence_sums.setdefault(sequence, _flow_metric_sums())
+                sequence_valid_pixels.setdefault(sequence, 0)
+                sequence_samples.setdefault(sequence, 0)
+                sequence_sums[sequence]["epe"] += float(epe.sum().item())
+                sequence_sums[sequence]["1pe"] += float((epe > 1).sum().item())
+                sequence_sums[sequence]["2pe"] += float((epe > 2).sum().item())
+                sequence_sums[sequence]["3pe"] += float((epe > 3).sum().item())
+                sequence_sums[sequence]["angle"] += float(angle.sum().item())
+                sequence_valid_pixels[sequence] += count
+                sequence_samples[sequence] += 1
+    output: dict[str, Any] = {
+        group: _flow_metric_summary(sums[group], valid_pixels[group], samples[group])
+        for group in groups
+    }
+    if sequence_sums:
+        per_sequence = {
+            sequence: _flow_metric_summary(
+                sequence_sums[sequence],
+                sequence_valid_pixels[sequence],
+                sequence_samples[sequence],
+            )
+            for sequence in sorted(sequence_sums)
         }
+        metric_names = ("aepe", "1pe", "2pe", "3pe", "aae_degrees")
+        output["per_sequence"] = per_sequence
+        output["sequence_average"] = {
+            key: sum(values[key] for values in per_sequence.values()) / len(per_sequence)
+            for key in metric_names
+        }
+        output["sequence_average"].update(
+            {
+                "sequences": len(per_sequence),
+                "valid_pixels": sum(sequence_valid_pixels.values()),
+                "samples": sum(sequence_samples.values()),
+            }
+        )
     output["runtime"] = {
         "model_latency_ms_per_sample": 1000.0 * elapsed_seconds / max(total_samples, 1)
     }

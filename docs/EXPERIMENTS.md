@@ -7,12 +7,14 @@
 
 | Run | Pretraining | Inference window | Command change |
 |---|---|---:|---|
-| Scratch-short | none | 1 ms | `training.pretrained_checkpoint=null` |
-| Scratch-long | none | 5 ms | 上記 + `data.short_window_us=5000` |
-| S2L | S2L only | 1 ms | `loss.lambda_silence=0` |
-| SLA-SSL | S2L + silence | 1 ms | default |
+| Scratch | none | 10 ms | `training.pretrained_checkpoint=null` |
+| AutoEncoder | short-voxel reconstruction | 10 ms | `--config-name mvsec_autoencoder` |
+| S2L | S2L only | 10 ms | `loss.lambda_silence=0` |
+| SLA-SSL | S2L + silence | 10 ms | default |
 
-外部の MEM / MAE、F3 checkpoint と比較するときは、同じ ResNet backbone、voxel、split、
+MVSECの具体的な主表、data split、実行commandは
+[MVSEC_ABLATIONS.md](MVSEC_ABLATIONS.md)にまとめています。外部の MEM / MAE、F3 checkpoint と
+比較するときは、同じ ResNet backbone、voxel、split、
 fine-tuning config に揃えた encoder state を使用してください。外部手法そのものの再実装は
 このリポジトリには含めません。
 

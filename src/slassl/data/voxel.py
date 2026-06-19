@@ -36,6 +36,10 @@ class EventVoxelizer:
         if x.size == 0:
             return torch.zeros(shape, dtype=torch.float32)
 
+        # Rectification maps produce fractional coordinates. Nearest-pixel
+        # rasterization avoids the systematic top-left bias of integer truncation.
+        x = np.rint(x).astype(np.int64, copy=False)
+        y = np.rint(y).astype(np.int64, copy=False)
         valid = (
             (x >= 0)
             & (x < self.width)
@@ -44,8 +48,8 @@ class EventVoxelizer:
             & (t >= start_us)
             & (t <= end_us)
         )
-        x = x[valid].astype(np.int64, copy=False)
-        y = y[valid].astype(np.int64, copy=False)
+        x = x[valid]
+        y = y[valid]
         t = t[valid]
         p = p[valid]
         if x.size == 0:

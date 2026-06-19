@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import Dataset
 
 from slassl.data.dense import read_dense_target, resize_flow, resize_segmentation
+from slassl.data.dsec import decode_dsec_flow, read_dsec_flow_png
 from slassl.data.h5_events import H5EventReader
 from slassl.data.indexing import load_timestamp_index
 from slassl.data.voxel import EventVoxelizer
@@ -70,7 +71,14 @@ class EventWindowDataset(Dataset):
         self.flow_target_duration_us = (
             int(flow_target_duration_us) if flow_target_duration_us is not None else None
         )
-        if task not in {"ssl", "classification", "detection", "flow", "segmentation"}:
+        if task not in {
+            "ssl",
+            "classification",
+            "detection",
+            "flow",
+            "flow_inference",
+            "segmentation",
+        }:
             raise ValueError(f"Unknown task: {task}")
         if self.short_window_us <= 0 or self.long_window_us <= 0:
             raise ValueError("Event windows must be positive")
@@ -93,6 +101,7 @@ class EventWindowDataset(Dataset):
         self._annotations: dict[str, np.ndarray] = {}
         self._timestamp_indices: dict[str, np.ndarray] = {}
         self._dense_targets: dict[str, h5py.File] = {}
+        self._rectify_maps: dict[str, np.ndarray] = {}
 
     def __len__(self) -> int:
         return len(self.records)
@@ -112,7 +121,7 @@ class EventWindowDataset(Dataset):
         reader = self._reader(record["sequence"])
         end_us = int(record["timestamp_us"])
         window_us = self.long_window_us if self.task == "ssl" else self.short_window_us
-        start_us = end_us - window_us
+        start_us = int(record.get("window_start_us", end_us - window_us))
         index_map = None
         if record.get("timestamp_index"):
             index_path = record["timestamp_index"]
@@ -121,12 +130,34 @@ class EventWindowDataset(Dataset):
                     self.data_root / index_path, self.event_camera
                 )
             index_map = self._timestamp_indices[index_path]
-        return reader.read_us(
+        x, y, t, p = reader.read_us(
             start_us,
             end_us,
             index_map=index_map,
             index_period_us=int(record.get("timestamp_index_period_us", 20)),
+            end_inclusive=bool(record.get("end_inclusive", True)),
         )
+        if rectify_path := record.get("rectify_map"):
+            if rectify_path not in self._rectify_maps:
+                with h5py.File(self.data_root / rectify_path, "r") as handle:
+                    if "rectify_map" not in handle:
+                        raise ValueError(f"Missing rectify_map dataset in {rectify_path}")
+                    self._rectify_maps[rectify_path] = np.asarray(handle["rectify_map"])
+            rectify_map = self._rectify_maps[rectify_path]
+            source_x = np.asarray(x, dtype=np.int64)
+            source_y = np.asarray(y, dtype=np.int64)
+            valid = (
+                (source_x >= 0)
+                & (source_x < rectify_map.shape[1])
+                & (source_y >= 0)
+                & (source_y < rectify_map.shape[0])
+            )
+            rectified = rectify_map[source_y[valid], source_x[valid]]
+            x = rectified[:, 0]
+            y = rectified[:, 1]
+            t = t[valid]
+            p = p[valid]
+        return x, y, t, p
 
     def _detection_target(self, record: dict[str, Any]) -> tuple[torch.Tensor, torch.Tensor]:
         if "annotations" not in record:
@@ -175,11 +206,20 @@ class EventWindowDataset(Dataset):
             segmentation_ignore_index=self.segmentation_ignore_index,
         )
 
+    def _flow_target(
+        self, record: dict[str, Any]
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if str(record["target_format"]) == "dsec_flow":
+            encoded = read_dsec_flow_png(self.data_root / str(record["target"]))
+            flow, valid = decode_dsec_flow(encoded)
+            return torch.from_numpy(flow), torch.from_numpy(valid)
+        return self._dense_target(record), None
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
         end_us = int(record["timestamp_us"])
         x, y, t, p = self._events(record)
-        short_start = end_us - self.short_window_us
+        short_start = int(record.get("window_start_us", end_us - self.short_window_us))
         short_mask = t >= short_start
         short_args = (x[short_mask], y[short_mask], t[short_mask], p[short_mask])
         short = self.voxelizer(*short_args, short_start, end_us)
@@ -193,7 +233,7 @@ class EventWindowDataset(Dataset):
         if flipped:
             short = short.flip(-1)
 
-        duration_ms = self.short_window_us / 1000.0
+        duration_ms = (end_us - short_start) / 1000.0
         density = float(short_mask.sum()) / (
             self.voxelizer.height * self.voxelizer.width * max(duration_ms, 1e-6)
         )
@@ -203,6 +243,9 @@ class EventWindowDataset(Dataset):
             "sample_id": record.get("sample_id", str(index)),
             "timestamp_us": end_us,
         }
+        for key in ("output_sequence", "output_index", "target_dt_us", "metric_sequence"):
+            if key in record:
+                sample[key] = record[key]
         if self.task == "ssl":
             long = self.voxelizer(x, y, t, p, end_us - self.long_window_us, end_us)
             occupancy = self.voxelizer.occupancy(
@@ -234,13 +277,24 @@ class EventWindowDataset(Dataset):
                 "image_id": torch.tensor([index], dtype=torch.int64),
             }
         elif self.task == "flow":
+            raw_target, target_valid = self._flow_target(record)
             target = resize_flow(
-                self._dense_target(record), (self.voxelizer.height, self.voxelizer.width)
+                raw_target, (self.voxelizer.height, self.voxelizer.width)
             )
+            if target_valid is not None and tuple(target_valid.shape) != (
+                self.voxelizer.height,
+                self.voxelizer.width,
+            ):
+                target_valid = resize_segmentation(
+                    target_valid.long(), (self.voxelizer.height, self.voxelizer.width)
+                ).bool()
             target_dt_us = int(record.get("target_dt_us", 0))
             if self.flow_target_duration_us is not None and target_dt_us > 0:
                 target *= self.flow_target_duration_us / target_dt_us
-            valid = torch.isfinite(target).all(dim=0) & (target.norm(dim=0) > 0)
+            finite = torch.isfinite(target).all(dim=0)
+            valid = target_valid & finite if target_valid is not None else (
+                finite & (target.norm(dim=0) > 0)
+            )
             if valid_height := record.get("valid_height"):
                 valid[int(valid_height) :] = False
             target = torch.nan_to_num(target)
@@ -248,7 +302,11 @@ class EventWindowDataset(Dataset):
                 target = target.flip(-1)
                 target[0] = -target[0]
                 valid = valid.flip(-1)
-            valid &= short.abs().sum(dim=(0, 1)) > 0
+            valid_mask_mode = str(record.get("valid_mask_mode", "event_support"))
+            if valid_mask_mode == "event_support":
+                valid &= short.abs().sum(dim=(0, 1)) > 0
+            elif valid_mask_mode != "target":
+                raise ValueError(f"Unknown flow valid_mask_mode: {valid_mask_mode}")
             sample["target"] = target
             sample["valid_mask"] = valid
         elif self.task == "segmentation":
@@ -335,6 +393,8 @@ class EventSequenceDataset(Dataset):
         for key in ("label", "target", "valid_mask"):
             if key in samples[-1]:
                 output[key] = samples[-1][key]
+        if "metric_sequence" in samples[-1]:
+            output["metric_sequence"] = samples[-1]["metric_sequence"]
 
         if self.temporal_shuffle:
             permutation = torch.randperm(output["short"].shape[2])

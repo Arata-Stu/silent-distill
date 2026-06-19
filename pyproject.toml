@@ -15,6 +15,7 @@ dependencies = [
   "imageio-ffmpeg>=0.5",
   "numpy>=2.0",
   "Pillow>=10.0",
+  "pypng>=0.20220715.0",
   "PyYAML>=6.0",
   "tensorboard>=2.16",
   "torch>=2.2",
@@ -33,9 +34,12 @@ sla-evaluate = "slassl.cli.evaluate:main"
 sla-data-stats = "slassl.cli.data_stats:main"
 sla-index-h5 = "slassl.cli.index_h5:main"
 sla-index-dense = "slassl.cli.index_dense:main"
+sla-index-dsec-test = "slassl.cli.index_dsec_test:main"
+sla-index-dsec-flow = "slassl.cli.index_dsec_flow:main"
 sla-convert-numpy = "slassl.cli.convert_numpy:main"
 sla-visualize-events = "slassl.cli.visualize_events:main"
 sla-visualize-flow = "slassl.cli.visualize_flow:main"
+sla-export-dsec-flow = "slassl.cli.export_dsec_flow:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -11,7 +11,7 @@ from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
 from slassl.config import hydra_config_path
-from slassl.models import SLASSLModel
+from slassl.models import EventAutoEncoderModel, SLASSLModel
 from slassl.training import (
     append_metrics,
     build_dataset,
@@ -48,17 +48,26 @@ def main(config: DictConfig) -> None:
     dataset = build_dataset(config, "ssl")
     loader, sampler = build_loader(dataset, config, rank, world_size, shuffle=True)
     polarity_channels = 2 if config.data.use_polarity else 1
-    model = SLASSLModel(
-        backbone=config.model.backbone,
-        input_channels=polarity_channels * int(config.data.bins),
-        polarity_channels=polarity_channels,
-        temporal_bins=int(config.data.bins),
-        projection_hidden_dim=int(config.model.projection_hidden_dim),
-        projection_dim=int(config.model.projection_dim),
-        small_stem=bool(config.model.small_stem),
-        loss_config=config.loss,
-        model_config=config.model,
-    ).to(device)
+    objective = str(config.get("objective", "sla_ssl")).lower()
+    model_arguments = {
+        "backbone": config.model.backbone,
+        "input_channels": polarity_channels * int(config.data.bins),
+        "small_stem": bool(config.model.small_stem),
+        "model_config": config.model,
+    }
+    if objective == "sla_ssl":
+        model = SLASSLModel(
+            **model_arguments,
+            polarity_channels=polarity_channels,
+            temporal_bins=int(config.data.bins),
+            projection_hidden_dim=int(config.model.projection_hidden_dim),
+            projection_dim=int(config.model.projection_dim),
+            loss_config=config.loss,
+        ).to(device)
+    elif objective == "autoencoder":
+        model = EventAutoEncoderModel(**model_arguments).to(device)
+    else:
+        raise ValueError(f"Unknown pretraining objective: {objective}")
     if world_size > 1:
         model = DistributedDataParallel(model, device_ids=[local_rank], broadcast_buffers=False)
 
@@ -121,8 +130,16 @@ def main(config: DictConfig) -> None:
                     and (global_step + 1) % int(config.training.log_every) == 0
                 )
                 short = batch["short"].to(device, non_blocking=True)
-                long = batch["long"].to(device, non_blocking=True)
-                occupancy = batch["occupancy"].to(device, non_blocking=True)
+                long = (
+                    batch["long"].to(device, non_blocking=True)
+                    if objective == "sla_ssl"
+                    else None
+                )
+                occupancy = (
+                    batch["occupancy"].to(device, non_blocking=True)
+                    if objective == "sla_ssl"
+                    else None
+                )
                 synchronization = (
                     model.no_sync()
                     if isinstance(model, DistributedDataParallel) and not should_update
