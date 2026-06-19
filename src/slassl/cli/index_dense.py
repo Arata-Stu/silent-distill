@@ -46,20 +46,25 @@ def _target_path(data_path: Path, dataset: str, task: str) -> Path:
 
 
 def _target_description(
-    data_path: Path, target_path: Path, dataset: str, task: str, camera: str
-) -> tuple[np.ndarray, str, int | None]:
+    data_path: Path,
+    target_path: Path,
+    dataset: str,
+    task: str,
+    camera: str,
+    event_bounds_us: tuple[int, int],
+) -> tuple[np.ndarray, str, int | None, str]:
     with h5py.File(target_path, "r") as target:
         if dataset == "m3ed" and task == "flow":
             group = f"flow/prophesee/{camera}"
             if group not in target:
                 raise ValueError(f"Missing {group}")
             timestamps = np.asarray(target["ts"][:], dtype=np.int64)
-            return timestamps, "m3ed_flow", None
+            return timestamps, "m3ed_flow", None, "native_us"
         if dataset == "m3ed" and task == "segmentation":
             if "predictions" not in target or "ts" not in target:
                 raise ValueError("Missing predictions or ts")
             timestamps = np.asarray(target["ts"][:], dtype=np.int64)
-            return timestamps, "m3ed_segmentation", None
+            return timestamps, "m3ed_segmentation", None, "native_us"
         group = f"davis/{camera}"
         if f"{group}/flow_dist" not in target or f"{group}/flow_dist_ts" not in target:
             raise ValueError(f"Missing {group}/flow_dist or flow_dist_ts")
@@ -67,10 +72,44 @@ def _target_description(
             if "absolute_start_time" not in data.attrs:
                 raise ValueError("MVSEC data HDF5 is missing absolute_start_time")
             absolute_start = float(data.attrs["absolute_start_time"])
-        timestamps = np.rint(
-            (np.asarray(target[f"{group}/flow_dist_ts"][:]) - absolute_start) * 1_000_000.0
-        ).astype(np.int64)
-        return timestamps, "mvsec_flow", 193
+        raw_timestamps = np.asarray(target[f"{group}/flow_dist_ts"][:], dtype=np.float64)
+        timestamps, alignment = _align_mvsec_timestamps(
+            raw_timestamps, absolute_start, event_bounds_us
+        )
+        return timestamps, "mvsec_flow", 193, alignment
+
+
+def _align_mvsec_timestamps(
+    raw_timestamps: np.ndarray,
+    absolute_start_time: float,
+    event_bounds_us: tuple[int, int],
+) -> tuple[np.ndarray, str]:
+    first_us, last_us = event_bounds_us
+    candidates = {
+        "absolute_seconds": np.rint(raw_timestamps * 1_000_000.0).astype(np.int64),
+        "relative_seconds": np.rint(
+            (raw_timestamps - absolute_start_time) * 1_000_000.0
+        ).astype(np.int64),
+        "native_us": np.rint(raw_timestamps).astype(np.int64),
+    }
+    event_center = (first_us + last_us) / 2.0
+
+    def score(timestamps: np.ndarray) -> tuple[int, float]:
+        overlap = int(((timestamps >= first_us) & (timestamps <= last_us)).sum())
+        center = float(np.median(timestamps)) if timestamps.size else 0.0
+        return overlap, -abs(center - event_center)
+
+    alignment, timestamps = max(candidates.items(), key=lambda item: score(item[1]))
+    if score(timestamps)[0] == 0:
+        ranges = ", ".join(
+            f"{name}=[{int(value.min())},{int(value.max())}]"
+            for name, value in candidates.items()
+            if value.size
+        )
+        raise ValueError(
+            f"MVSEC flow timestamps do not overlap event range [{first_us},{last_us}]; {ranges}"
+        )
+    return timestamps, alignment
 
 
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
@@ -102,11 +141,16 @@ def main() -> None:
             skipped.append({"data": str(data_path), "reason": "target file not found"})
             continue
         try:
-            timestamps, target_format, valid_height = _target_description(
-                data_path, target_path, args.dataset, args.task, args.camera
-            )
             with H5EventReader(data_path, camera=args.camera) as reader:
                 first_us, last_us = reader.bounds_us()
+            timestamps, target_format, valid_height, timestamp_alignment = _target_description(
+                data_path,
+                target_path,
+                args.dataset,
+                args.task,
+                args.camera,
+                (first_us, last_us),
+            )
         except (OSError, ValueError, KeyError) as exc:
             skipped.append({"data": str(data_path), "reason": str(exc)})
             continue
@@ -135,11 +179,31 @@ def main() -> None:
             records.append(record)
             kept += 1
         sequences.append(
-            {"data": data_relative, "target": target_relative, "samples": kept}
+            {
+                "data": data_relative,
+                "target": target_relative,
+                "samples": kept,
+                "timestamp_alignment": timestamp_alignment,
+                "event_range_us": [first_us, last_us],
+                "target_range_us": [int(timestamps.min()), int(timestamps.max())],
+            }
         )
+        if kept == 0:
+            skipped.append(
+                {
+                    "data": str(data_path),
+                    "reason": (
+                        f"target range [{int(timestamps.min())},{int(timestamps.max())}] "
+                        f"does not yield a full window in event range [{first_us},{last_us}]"
+                    ),
+                }
+            )
 
     if not records:
-        raise RuntimeError(f"No compatible {args.dataset} {args.task} targets found")
+        reasons = "; ".join(f"{item['data']}: {item['reason']}" for item in skipped)
+        raise RuntimeError(
+            f"No compatible {args.dataset} {args.task} targets found. {reasons}"
+        )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     _write_jsonl(args.output_dir / f"{args.split}_{args.task}.jsonl", records)
     metadata = {

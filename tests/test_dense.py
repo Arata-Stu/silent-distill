@@ -7,6 +7,7 @@ import torch
 from slassl.data.dataset import EventWindowDataset
 from slassl.data.dense import map_cityscapes_19_to_11, read_dense_target
 from slassl.models.dense import DensePredictionModel
+from slassl.cli.index_dense import _align_mvsec_timestamps
 
 
 def test_reads_m3ed_flow_and_semantic_targets(tmp_path) -> None:
@@ -83,3 +84,16 @@ def test_dense_prediction_model_restores_input_resolution() -> None:
     model = DensePredictionModel("vit_tiny", 4, 2, False, config)
     output = model(torch.randn(2, 2, 2, 16, 20))
     assert output.shape == (2, 2, 16, 20)
+
+
+def test_aligns_mvsec_absolute_and_relative_timestamps() -> None:
+    raw = np.array([1_600_000_001.0, 1_600_000_002.0])
+    relative, relative_mode = _align_mvsec_timestamps(
+        raw, 1_600_000_000.0, (0, 3_000_000)
+    )
+    absolute, absolute_mode = _align_mvsec_timestamps(
+        raw, 1_600_000_000.0, (1_600_000_000_000_000, 1_600_000_003_000_000)
+    )
+    assert relative.tolist() == [1_000_000, 2_000_000]
+    assert relative_mode == "relative_seconds"
+    assert absolute_mode == "absolute_seconds"
