@@ -55,6 +55,11 @@ training:
 
 evaluation:
   every_epochs: 5
+  monitor: all/aepe
+  monitor_mode: min
+  visualize_samples: 6
+  visualization_max_flow: null
+  visualization_magnitude_percentile: 99.0
   low_density_max: 0.001
   high_density_min: 0.01
 

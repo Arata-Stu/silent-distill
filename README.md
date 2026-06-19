@@ -183,7 +183,12 @@ sla-index-dense --dataset m3ed --task segmentation \
 sla-index-dense --dataset mvsec --task flow \
   --data-root "$MVSEC_ROOT" --search-root "$MVSEC_ROOT/outdoor_day" \
   --output-dir outputs/mvsec/manifests_dense --split train \
-  --include outdoor_day2
+  --include outdoor_day2 --end-fraction 0.8 --boundary-margin-us 50000
+
+sla-index-dense --dataset mvsec --task flow \
+  --data-root "$MVSEC_ROOT" --search-root "$MVSEC_ROOT/outdoor_day" \
+  --output-dir outputs/mvsec/manifests_dense --split val \
+  --include outdoor_day2 --start-fraction 0.8 --boundary-margin-us 50000
 
 sla-index-dense --dataset mvsec --task flow \
   --data-root "$MVSEC_ROOT" --search-root "$MVSEC_ROOT/outdoor_day" \
@@ -205,7 +210,40 @@ sla-finetune --config-name m3ed_segmentation \
   data.root="$M3ED_ROOT" \
   data.train_manifest="$PWD/outputs/m3ed/manifests_dense/train_segmentation.jsonl" \
   data.validation_manifest="$PWD/outputs/m3ed/manifests_dense/val_segmentation.jsonl"
+
+sla-finetune --config-name mvsec_flow \
+  hydra.run.dir="$PWD/outputs/downstream/mvsec_flow_resnet50" \
+  training.pretrained_checkpoint=/path/to/pretrain/checkpoint_last.pt \
+  data.root="$MVSEC_ROOT" \
+  data.train_manifest="$PWD/outputs/mvsec/manifests_dense/train_flow.jsonl" \
+  data.validation_manifest="$PWD/outputs/mvsec/manifests_dense/val_flow.jsonl"
 ```
+
+flow validationでは`all/aepe`を最小化するepochを`checkpoint_best.pt`として保存します。
+`evaluation.every_epochs`ごとに固定6 sampleのevent、GT、予測、event-masked GT/予測、評価maskを
+`validation_visualizations/epoch_XXXX/`とTensorBoardの`validation_flow/*`へ記録します。
+MVSECの既定は毎epoch、M3EDの既定は計算量を考慮して5 epochごとです。
+
+fine-tuned optical-flow checkpointは、F3と同じevent-supported protocolで可視化できます。
+GTと予測にはsample内で共通のmagnitude scaleを使い、`event_masked`版にはfinite/nonzero GT、
+dataset固有の有効領域、event supportの積を適用します。
+
+```bash
+sla-visualize-flow \
+  --config configs/eval/mvsec_flow.yaml \
+  --output-dir "$PWD/outputs/downstream/mvsec_flow_resnet50/visualizations/test" \
+  --max-samples 100 \
+  --sample-stride 10 \
+  --set checkpoint="$PWD/outputs/downstream/mvsec_flow_resnet50/checkpoint_best.pt" \
+  --set data.root="$MVSEC_ROOT" \
+  --set data.manifest="$PWD/outputs/mvsec/manifests_dense/test_flow.jsonl" \
+  --set data.flow_target_duration_us=null
+```
+
+出力は`prediction/{full,event_masked}`、`ground_truth/{full,event_masked}`、`events`、
+`masks/{event_support,evaluation_valid}`に分かれます。`--save-arrays`を付けると可視化前の
+flowとmaskも圧縮NPZで保存します。sequence間で色のmagnitude scaleを固定する場合は
+`--max-flow 20`のように明示します。
 
 label schema、11-class mapping、flow valid-mask protocolはApache-2.0のFast Feature Fields実装を
 参照しています。F3本体、SegFormer、Transformers依存は取り込んでいません。
@@ -234,6 +272,8 @@ Hydra overrideで変更できます。各runには以下が含まれます。
 - `metrics.jsonl`: step ごとの学習指標
 - `validation_metrics.jsonl`: density subset を含む validation 指標
 - `checkpoint_XXXX.pt`, `checkpoint_last.pt`: optimizer / scaler / scheduler を含む checkpoint
+- `checkpoint_best.pt`, `best_validation.json`: validation monitorが最良のcheckpointと選択根拠
+- `validation_visualizations/`: flow validationの固定sample可視化
 - `tensorboard/`: train loss、各S2L scale、LR、EMA momentum、表現崩壊診断、validation metric
 
 評価 JSON には accumulation time と GPU forward の sample 当たり latency も記録されます。

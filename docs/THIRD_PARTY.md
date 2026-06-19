@@ -6,9 +6,10 @@
 - License: Apache License 2.0
 
 The dense downstream implementation references the dataset schemas, M3ED Cityscapes
-19-to-11 class mapping, and event-supported optical-flow evaluation protocol in Fast Feature
-Fields. Model and training code in this repository is independently implemented against the
-existing `slassl` encoder, Hydra, TensorBoard, and manifest abstractions.
+19-to-11 class mapping, event-supported optical-flow evaluation protocol, and the full versus
+event-masked flow visualization layout in Fast Feature Fields. Model, training, and rendering
+code in this repository is independently implemented against the existing `slassl` encoder,
+Hydra, TensorBoard, manifest abstractions, NumPy, and Pillow.
 
 Unlike the centered event context used by the referenced F3 ground-truth flow loader, this
 repository ends each event window at the target timestamp so that dense evaluation remains

@@ -32,6 +32,24 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument("--short-window-us", type=int, default=10_000)
     result.add_argument("--target-stride", type=int, default=1)
+    result.add_argument(
+        "--start-fraction",
+        type=float,
+        default=0.0,
+        help="Start of the selected recording-time interval in [0,1)",
+    )
+    result.add_argument(
+        "--end-fraction",
+        type=float,
+        default=1.0,
+        help="End of the selected recording-time interval in (0,1]",
+    )
+    result.add_argument(
+        "--boundary-margin-us",
+        type=int,
+        default=0,
+        help="Exclude this duration next to each interior temporal split boundary",
+    )
     return result
 
 
@@ -124,10 +142,35 @@ def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
             handle.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+def _temporal_split_bounds(
+    first_us: int,
+    last_us: int,
+    start_fraction: float,
+    end_fraction: float,
+    boundary_margin_us: int,
+) -> tuple[int, int]:
+    event_duration_us = last_us - first_us
+    selected_start_us = first_us + round(event_duration_us * start_fraction)
+    selected_end_us = first_us + round(event_duration_us * end_fraction)
+    if start_fraction > 0:
+        selected_start_us += boundary_margin_us
+    if end_fraction < 1:
+        selected_end_us -= boundary_margin_us
+    if selected_start_us >= selected_end_us:
+        raise ValueError(
+            "Temporal split is empty after applying boundary-margin-us; reduce the margin"
+        )
+    return selected_start_us, selected_end_us
+
+
 def main() -> None:
     args = parser().parse_args()
     if args.short_window_us <= 0 or args.target_stride <= 0:
         raise ValueError("short-window-us and target-stride must be positive")
+    if not 0.0 <= args.start_fraction < args.end_fraction <= 1.0:
+        raise ValueError("Require 0 <= start-fraction < end-fraction <= 1")
+    if args.boundary_margin_us < 0:
+        raise ValueError("boundary-margin-us must be non-negative")
     data_root = args.data_root.resolve()
     search_root = args.search_root.resolve()
     pattern = args.file_glob or ("*_data.h5" if args.dataset == "m3ed" else "*_data.hdf5")
@@ -161,10 +204,19 @@ def main() -> None:
             continue
         data_relative = str(data_path.resolve().relative_to(data_root))
         target_relative = str(target_path.resolve().relative_to(data_root))
+        selected_start_us, selected_end_us = _temporal_split_bounds(
+            first_us,
+            last_us,
+            args.start_fraction,
+            args.end_fraction,
+            args.boundary_margin_us,
+        )
         kept = 0
         for target_index in range(0, len(timestamps), args.target_stride):
             timestamp_us = int(timestamps[target_index])
             if timestamp_us - args.short_window_us < first_us or timestamp_us > last_us:
+                continue
+            if timestamp_us < selected_start_us or timestamp_us > selected_end_us:
                 continue
             record: dict[str, Any] = {
                 "sequence": data_relative,
@@ -191,6 +243,7 @@ def main() -> None:
                 "timestamp_alignment": timestamp_alignment,
                 "event_range_us": [first_us, last_us],
                 "target_range_us": [int(timestamps.min()), int(timestamps.max())],
+                "selected_range_us": [selected_start_us, selected_end_us],
             }
         )
         if kept == 0:
@@ -219,6 +272,9 @@ def main() -> None:
         "camera": args.camera,
         "short_window_us": args.short_window_us,
         "target_stride": args.target_stride,
+        "start_fraction": args.start_fraction,
+        "end_fraction": args.end_fraction,
+        "boundary_margin_us": args.boundary_margin_us,
         "samples": len(records),
         "sequences": sequences,
         "skipped": skipped,

@@ -7,7 +7,7 @@ import torch
 from slassl.data.dataset import EventWindowDataset
 from slassl.data.dense import map_cityscapes_19_to_11, read_dense_target
 from slassl.models.dense import DensePredictionModel
-from slassl.cli.index_dense import _align_mvsec_timestamps
+from slassl.cli.index_dense import _align_mvsec_timestamps, _temporal_split_bounds
 
 
 def test_reads_m3ed_flow_and_semantic_targets(tmp_path) -> None:
@@ -106,3 +106,10 @@ def test_aligns_raw_mvsec_without_absolute_start_time_attribute() -> None:
     )
     assert timestamps.tolist() == [1_600_000_001_000_000, 1_600_000_002_000_000]
     assert mode == "absolute_seconds"
+
+
+def test_temporal_split_leaves_a_gap_between_train_and_validation() -> None:
+    train = _temporal_split_bounds(0, 1_000_000, 0.0, 0.8, 50_000)
+    validation = _temporal_split_bounds(0, 1_000_000, 0.8, 1.0, 50_000)
+    assert train == (0, 750_000)
+    assert validation == (850_000, 1_000_000)

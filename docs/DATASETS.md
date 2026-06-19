@@ -64,3 +64,8 @@ https://daniilidis-group.github.io/mvsec/download/
 sequence由来の近接sampleがtrain/validation/testをまたがないよう、sequence単位でsplitを作ります。
 `sla-index-h5`の`--search-root`には対象splitのsequenceだけを含めてください。event-density thresholdは
 training splitだけから推定します。
+
+MVSECのように独立sequence数が不足する場合は、test sequenceを触らず、training sequenceを
+`sla-index-dense --end-fraction 0.8`と`--start-fraction 0.8`で時間順にtrain/validationへ分けます。
+両方に`--boundary-margin-us 50000`を指定すると境界の両側50 msを除外し、近接windowの重複を
+抑制できます。このvalidationはsequence-held-outではなくtemporal holdoutとして報告します。

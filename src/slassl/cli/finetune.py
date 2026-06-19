@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
 import hydra
+import numpy as np
 import torch
 import torch.nn.functional as F
 from omegaconf import DictConfig, OmegaConf
@@ -39,6 +41,7 @@ from slassl.utils import (
     seed_everything,
     unwrap_model,
 )
+from slassl.visualization import flow_sample_filename, save_flow_sample
 
 
 def build_model(config: Any) -> torch.nn.Module:
@@ -122,6 +125,128 @@ def _validation(model: torch.nn.Module, loader: Any, config: Any, device: torch.
     )
 
 
+def _validation_monitor(config: Any, metrics: dict[str, Any]) -> tuple[str, float, str]:
+    defaults = {
+        "classification": ("all/top1_accuracy", "max"),
+        "detection": ("all/map", "max"),
+        "flow": ("all/aepe", "min"),
+        "segmentation": ("all/mean_iou", "max"),
+    }
+    default_name, default_mode = defaults[str(config.task)]
+    name = str(config.evaluation.get("monitor", default_name))
+    mode = str(config.evaluation.get("monitor_mode", default_mode))
+    if mode not in {"min", "max"}:
+        raise ValueError("evaluation.monitor_mode must be min or max")
+    value: Any = metrics
+    for key in name.replace(".", "/").split("/"):
+        if not isinstance(value, dict) or key not in value:
+            raise KeyError(f"Validation monitor '{name}' is not present in metrics")
+        value = value[key]
+    return name, float(value), mode
+
+
+def _is_better(value: float, best: float | None, mode: str) -> bool:
+    if not math.isfinite(value):
+        return False
+    return best is None or (value < best if mode == "min" else value > best)
+
+
+def _checkpoint_state(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: Any,
+    scaler: Any,
+    epoch: int,
+    global_step: int,
+    config: Any,
+    best_validation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "model": unwrap_model(model).state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "scaler": scaler.state_dict(),
+        "epoch": epoch,
+        "global_step": global_step,
+        "task": config.task,
+        "config": resolved_config(config),
+        "best_validation": best_validation,
+    }
+
+
+@torch.inference_mode()
+def _visualize_validation_flow(
+    model: torch.nn.Module,
+    dataset: Any,
+    device: torch.device,
+    output_dir: Path,
+    epoch: int,
+    config: Any,
+    writer: Any,
+) -> None:
+    count = min(int(config.evaluation.get("visualize_samples", 0)), len(dataset))
+    if count <= 0:
+        return
+    indices = (
+        [0]
+        if count == 1
+        else [round(slot * (len(dataset) - 1) / (count - 1)) for slot in range(count)]
+    )
+    epoch_dir = output_dir / "validation_visualizations" / f"epoch_{epoch:04d}"
+    metadata = []
+    model.eval()
+    for slot, index in enumerate(indices):
+        sample = dataset[index]
+        short = sample["short"]
+        prediction = model(short.unsqueeze(0).to(device))[0].detach().cpu().numpy()
+        target = sample["target"].detach().cpu().numpy()
+        valid_mask = sample["valid_mask"].detach().cpu().numpy().astype(bool)
+        display_voxel = short[-1] if short.ndim == 5 else short
+        voxel = display_voxel.detach().cpu().numpy()
+        stem = flow_sample_filename(index, sample["sample_id"])
+        summary, images = save_flow_sample(
+            epoch_dir,
+            stem,
+            prediction,
+            target,
+            valid_mask,
+            voxel,
+            magnitude_scale=config.evaluation.get("visualization_max_flow"),
+            magnitude_percentile=float(
+                config.evaluation.get("visualization_magnitude_percentile", 99.0)
+            ),
+        )
+        summary.update(
+            {
+                "dataset_index": index,
+                "sample_id": str(sample["sample_id"]),
+                "timestamp_us": int(sample["timestamp_us"]),
+            }
+        )
+        metadata.append(summary)
+        if writer is not None:
+            mask_rgb = np.repeat(images["evaluation_valid"][..., None], 3, axis=2)
+            panel = np.concatenate(
+                (
+                    images["events"],
+                    images["ground_truth_full"],
+                    images["prediction_full"],
+                    images["ground_truth_event_masked"],
+                    images["prediction_event_masked"],
+                    mask_rgb,
+                ),
+                axis=1,
+            )
+            writer.add_image(
+                f"validation_flow/sample_{slot:02d}",
+                torch.from_numpy(panel).permute(2, 0, 1),
+                epoch,
+            )
+    (epoch_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
+
+
 @hydra.main(
     version_base="1.3",
     config_path=hydra_config_path("finetune"),
@@ -140,6 +265,7 @@ def main(config: DictConfig) -> None:
     train_loader, train_sampler = build_loader(
         train_dataset, config, rank, world_size, shuffle=True
     )
+    validation_dataset = None
     validation_loader = None
     if config.data.get("validation_manifest") and world_size == 1:
         validation_dataset = build_dataset(
@@ -176,6 +302,7 @@ def main(config: DictConfig) -> None:
     output_dir = Path(config.output_dir)
     writer = create_summary_writer(config, output_dir) if is_main_process() else None
     start_epoch, global_step = 0, 0
+    best_validation = None
     if config.training.get("resume"):
         checkpoint = torch.load(config.training.resume, map_location="cpu", weights_only=False)
         unwrap_model(model).load_state_dict(checkpoint["model"])
@@ -184,6 +311,7 @@ def main(config: DictConfig) -> None:
         scaler.load_state_dict(checkpoint["scaler"])
         start_epoch = int(checkpoint["epoch"]) + 1
         global_step = int(checkpoint["global_step"])
+        best_validation = checkpoint.get("best_validation")
     if is_main_process():
         output_dir.mkdir(parents=True, exist_ok=True)
         with (output_dir / "resolved_config.json").open("w", encoding="utf-8") as handle:
@@ -287,20 +415,56 @@ def main(config: DictConfig) -> None:
                     output_dir / "validation_metrics.jsonl", {"epoch": epoch, **metrics}
                 )
                 log_tensorboard_scalars(writer, "validation", metrics, epoch + 1)
+                monitor_name, monitor_value, monitor_mode = _validation_monitor(config, metrics)
+                previous_best = (
+                    float(best_validation["value"]) if best_validation is not None else None
+                )
+                if _is_better(monitor_value, previous_best, monitor_mode):
+                    best_validation = {
+                        "monitor": monitor_name,
+                        "mode": monitor_mode,
+                        "value": monitor_value,
+                        "epoch": epoch + 1,
+                    }
+                    if is_main_process():
+                        best_state = _checkpoint_state(
+                            model,
+                            optimizer,
+                            scheduler,
+                            scaler,
+                            epoch,
+                            global_step,
+                            config,
+                            best_validation,
+                        )
+                        atomic_torch_save(best_state, output_dir / "checkpoint_best.pt")
+                        (output_dir / "best_validation.json").write_text(
+                            json.dumps(best_validation, indent=2), encoding="utf-8"
+                        )
+                if is_main_process() and config.task == "flow":
+                    _visualize_validation_flow(
+                        unwrap_model(model),
+                        validation_dataset,
+                        device,
+                        output_dir,
+                        epoch + 1,
+                        config,
+                        writer,
+                    )
             if is_main_process() and (
                 (epoch + 1) % int(config.training.save_every_epochs) == 0
                 or epoch + 1 == int(config.training.epochs)
             ):
-                state = {
-                    "model": unwrap_model(model).state_dict(),
-                    "optimizer": optimizer.state_dict(),
-                    "scheduler": scheduler.state_dict(),
-                    "scaler": scaler.state_dict(),
-                    "epoch": epoch,
-                    "global_step": global_step,
-                    "task": config.task,
-                    "config": resolved_config(config),
-                }
+                state = _checkpoint_state(
+                    model,
+                    optimizer,
+                    scheduler,
+                    scaler,
+                    epoch,
+                    global_step,
+                    config,
+                    best_validation,
+                )
                 atomic_torch_save(state, output_dir / f"checkpoint_{epoch + 1:04d}.pt")
                 atomic_torch_save(state, output_dir / "checkpoint_last.pt")
     finally:

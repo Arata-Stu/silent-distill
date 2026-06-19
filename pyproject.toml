@@ -35,6 +35,7 @@ sla-index-h5 = "slassl.cli.index_h5:main"
 sla-index-dense = "slassl.cli.index_dense:main"
 sla-convert-numpy = "slassl.cli.convert_numpy:main"
 sla-visualize-events = "slassl.cli.visualize_events:main"
+sla-visualize-flow = "slassl.cli.visualize_flow:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
