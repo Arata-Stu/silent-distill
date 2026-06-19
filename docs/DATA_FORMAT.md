@@ -63,6 +63,19 @@ Detection sample (`boxes` は absolute XYXY、`labels` は背景 0 を避けて 
 `sequence` は config の `data.root` からの相対 path です。short と long の終端はどちらも
 `timestamp_us` であり、未来のイベントは読みません。
 
+Dense task sampleはlabel HDF5を複製せず、target indexを参照します。
+
+```json
+{"sequence":"seq_data.h5","timestamp_us":123456,"target":"seq_gt_flow.h5","target_index":42,"target_format":"m3ed_flow"}
+```
+
+`target_format`は`m3ed_flow`、`mvsec_flow`、`m3ed_segmentation`をサポートします。flow targetは
+`[2,H,W]`、segmentation targetは`[H,W]`として読み、event voxelと解像度が異なる場合はflow
+vectorのscale補正またはnearest-neighbor label resizeを行います。
+flow recordの`target_dt_us`はGT displacementの時間幅です。configの
+`data.flow_target_duration_us`を設定すると、一定速度を仮定して指定時間幅へflowをscaleします。
+`null`ではnative benchmark displacementを維持します。
+
 ## Voxel and density
 
 voxel shape は `[polarity, temporal_bin, height, width]` です。model 入力時に前 2 軸を

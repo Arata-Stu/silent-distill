@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import h5py
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from slassl.data.dense import read_dense_target, resize_flow, resize_segmentation
 from slassl.data.h5_events import H5EventReader
 from slassl.data.indexing import load_timestamp_index
 from slassl.data.voxel import EventVoxelizer
@@ -45,6 +47,9 @@ class EventWindowDataset(Dataset):
         timestamp_offset_us: float | None = None,
         detection_class_ids: list[int] | None = None,
         detection_min_box_diagonal: float = 0.0,
+        segmentation_num_classes: int = 11,
+        segmentation_ignore_index: int = 255,
+        flow_target_duration_us: int | None = None,
     ) -> None:
         self.manifest = Path(manifest)
         self.data_root = Path(data_root)
@@ -60,7 +65,12 @@ class EventWindowDataset(Dataset):
         self.timestamp_offset_us = timestamp_offset_us
         self.detection_class_ids = detection_class_ids or [0, 1, 2]
         self.detection_min_box_diagonal = float(detection_min_box_diagonal)
-        if task not in {"ssl", "classification", "detection"}:
+        self.segmentation_num_classes = int(segmentation_num_classes)
+        self.segmentation_ignore_index = int(segmentation_ignore_index)
+        self.flow_target_duration_us = (
+            int(flow_target_duration_us) if flow_target_duration_us is not None else None
+        )
+        if task not in {"ssl", "classification", "detection", "flow", "segmentation"}:
             raise ValueError(f"Unknown task: {task}")
         if self.short_window_us <= 0 or self.long_window_us <= 0:
             raise ValueError("Event windows must be positive")
@@ -82,6 +92,7 @@ class EventWindowDataset(Dataset):
         self._readers: dict[str, H5EventReader] = {}
         self._annotations: dict[str, np.ndarray] = {}
         self._timestamp_indices: dict[str, np.ndarray] = {}
+        self._dense_targets: dict[str, h5py.File] = {}
 
     def __len__(self) -> int:
         return len(self.records)
@@ -151,6 +162,19 @@ class EventWindowDataset(Dataset):
         )[valid]
         return torch.from_numpy(boxes_array.astype(np.float32)), torch.from_numpy(labels_array)
 
+    def _dense_target(self, record: dict[str, Any]) -> torch.Tensor:
+        relative_path = str(record["target"])
+        if relative_path not in self._dense_targets:
+            self._dense_targets[relative_path] = h5py.File(self.data_root / relative_path, "r")
+        return read_dense_target(
+            self._dense_targets[relative_path],
+            str(record["target_format"]),
+            int(record["target_index"]),
+            camera=str(record.get("target_camera", self.event_camera)),
+            segmentation_num_classes=self.segmentation_num_classes,
+            segmentation_ignore_index=self.segmentation_ignore_index,
+        )
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         record = self.records[index]
         end_us = int(record["timestamp_us"])
@@ -209,11 +233,38 @@ class EventWindowDataset(Dataset):
                 "labels": labels,
                 "image_id": torch.tensor([index], dtype=torch.int64),
             }
+        elif self.task == "flow":
+            target = resize_flow(
+                self._dense_target(record), (self.voxelizer.height, self.voxelizer.width)
+            )
+            target_dt_us = int(record.get("target_dt_us", 0))
+            if self.flow_target_duration_us is not None and target_dt_us > 0:
+                target *= self.flow_target_duration_us / target_dt_us
+            valid = torch.isfinite(target).all(dim=0) & (target.norm(dim=0) > 0)
+            if valid_height := record.get("valid_height"):
+                valid[int(valid_height) :] = False
+            target = torch.nan_to_num(target)
+            if flipped:
+                target = target.flip(-1)
+                target[0] = -target[0]
+                valid = valid.flip(-1)
+            valid &= short.abs().sum(dim=(0, 1)) > 0
+            sample["target"] = target
+            sample["valid_mask"] = valid
+        elif self.task == "segmentation":
+            target = resize_segmentation(
+                self._dense_target(record), (self.voxelizer.height, self.voxelizer.width)
+            )
+            if flipped:
+                target = target.flip(-1)
+            sample["target"] = target
         return sample
 
     def __del__(self) -> None:
         for reader in getattr(self, "_readers", {}).values():
             reader.close()
+        for handle in getattr(self, "_dense_targets", {}).values():
+            handle.close()
 
 
 class EventSequenceDataset(Dataset):
@@ -281,7 +332,7 @@ class EventSequenceDataset(Dataset):
         for key in ("long", "occupancy"):
             if key in samples[0]:
                 output[key] = torch.stack([sample[key] for sample in samples])
-        for key in ("label", "target"):
+        for key in ("label", "target", "valid_mask"):
             if key in samples[-1]:
                 output[key] = samples[-1][key]
 

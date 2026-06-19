@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,13 @@ from torch.nn.parallel import DistributedDataParallel
 from tqdm import tqdm
 
 from slassl.config import hydra_config_path
-from slassl.evaluation import evaluate_classification, evaluate_detection
-from slassl.models import ClassificationModel, build_detector
+from slassl.evaluation import (
+    evaluate_classification,
+    evaluate_detection,
+    evaluate_flow,
+    evaluate_segmentation,
+)
+from slassl.models import ClassificationModel, DensePredictionModel, build_detector
 from slassl.models.downstream import load_pretrained_encoder
 from slassl.training import (
     append_metrics,
@@ -21,6 +27,7 @@ from slassl.training import (
     build_loader,
     cosine_warmup_scheduler,
     create_summary_writer,
+    gradient_accumulation_groups,
     log_tensorboard_scalars,
     resolved_config,
 )
@@ -55,6 +62,15 @@ def build_model(config: Any) -> torch.nn.Module:
             int(config.model.min_size),
             int(config.model.max_size),
         )
+    if config.task in {"flow", "segmentation"}:
+        output_channels = 2 if config.task == "flow" else int(config.model.num_classes)
+        return DensePredictionModel(
+            config.model.backbone,
+            channels,
+            output_channels,
+            bool(config.model.small_stem),
+            config.model,
+        )
     raise ValueError(f"Unknown downstream task: {config.task}")
 
 
@@ -62,9 +78,14 @@ def load_ssl_weights(model: torch.nn.Module, config: Any) -> None:
     checkpoint = config.training.get("pretrained_checkpoint")
     if not checkpoint:
         return
-    prefix = "encoder.backbone." if config.task == "classification" else "backbone.body."
+    prefix = "backbone.body." if config.task == "detection" else "encoder."
     missing, unexpected = load_pretrained_encoder(model, checkpoint, prefix)
-    allowed_missing = ("head.", "backbone.fpn.", "head.classification_head.")
+    allowed_missing = (
+        "head.",
+        "decoder.",
+        "backbone.fpn.",
+        "head.classification_head.",
+    )
     important_missing = [key for key in missing if not key.startswith(allowed_missing)]
     if important_missing or unexpected:
         print(
@@ -76,7 +97,7 @@ def load_ssl_weights(model: torch.nn.Module, config: Any) -> None:
 
 
 def _set_backbone_trainable(model: torch.nn.Module, task: str, trainable: bool) -> None:
-    backbone = model.encoder if task == "classification" else model.backbone
+    backbone = model.backbone if task == "detection" else model.encoder
     for parameter in backbone.parameters():
         parameter.requires_grad_(trainable)
 
@@ -86,7 +107,19 @@ def _validation(model: torch.nn.Module, loader: Any, config: Any, device: torch.
     high_min = float(config.evaluation.high_density_min)
     if config.task == "classification":
         return evaluate_classification(model, loader, device, low_max, high_min)
-    return evaluate_detection(model, loader, device, low_max, high_min)
+    if config.task == "detection":
+        return evaluate_detection(model, loader, device, low_max, high_min)
+    if config.task == "flow":
+        return evaluate_flow(model, loader, device, low_max, high_min)
+    return evaluate_segmentation(
+        model,
+        loader,
+        device,
+        int(config.model.num_classes),
+        int(config.data.get("segmentation_ignore_index", 255)),
+        low_max,
+        high_min,
+    )
 
 
 @hydra.main(
@@ -126,11 +159,16 @@ def main(config: DictConfig) -> None:
         lr=float(config.training.learning_rate),
         weight_decay=float(config.training.weight_decay),
     )
-    total_steps = int(config.training.epochs) * len(train_loader)
+    accumulation_steps = int(config.training.get("gradient_accumulation_steps", 1))
+    accumulation_groups = gradient_accumulation_groups(len(train_loader), accumulation_steps)
+    if not accumulation_groups:
+        raise ValueError("Training loader is empty; reduce training.batch_size or add samples")
+    updates_per_epoch = len(accumulation_groups)
+    total_steps = int(config.training.epochs) * updates_per_epoch
     scheduler = cosine_warmup_scheduler(
         optimizer,
         total_steps,
-        int(config.training.warmup_epochs) * len(train_loader),
+        int(config.training.warmup_epochs) * updates_per_epoch,
         float(config.training.minimum_lr) / float(config.training.learning_rate),
     )
     amp_enabled = bool(config.training.amp) and device.type == "cuda"
@@ -163,25 +201,58 @@ def main(config: DictConfig) -> None:
             progress = tqdm(
                 train_loader, disable=not is_main_process(), desc=f"finetune {epoch + 1}"
             )
-            for batch in progress:
-                optimizer.zero_grad(set_to_none=True)
-                with torch.autocast(device_type=device.type, enabled=amp_enabled):
-                    if config.task == "classification":
-                        inputs = batch["short"].to(device, non_blocking=True)
-                        labels = batch["label"].to(device, non_blocking=True)
-                        loss = F.cross_entropy(model(inputs), labels)
-                    else:
-                        short = batch["short"]
-                        if short.ndim == 6:
-                            short = short[:, -1]
-                        images = [voxel.flatten(0, 1).to(device) for voxel in short]
-                        targets = [
-                            {key: value.to(device) for key, value in target.items()}
-                            for target in batch["target"]
-                        ]
-                        loss_dict = model(images, targets)
-                        loss = sum(loss_dict.values())
-                scaler.scale(loss).backward()
+            optimizer.zero_grad(set_to_none=True)
+            accumulated_loss = torch.zeros((), device=device)
+            for batch_index, batch in enumerate(progress):
+                group_index = batch_index // accumulation_steps
+                group_start = group_index * accumulation_steps
+                group_size = accumulation_groups[group_index]
+                should_update = batch_index - group_start + 1 == group_size
+                synchronization = (
+                    model.no_sync()
+                    if isinstance(model, DistributedDataParallel) and not should_update
+                    else nullcontext()
+                )
+                with synchronization:
+                    with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                        if config.task == "classification":
+                            inputs = batch["short"].to(device, non_blocking=True)
+                            labels = batch["label"].to(device, non_blocking=True)
+                            loss = F.cross_entropy(model(inputs), labels)
+                        elif config.task == "detection":
+                            short = batch["short"]
+                            if short.ndim == 6:
+                                short = short[:, -1]
+                            images = [voxel.flatten(0, 1).to(device) for voxel in short]
+                            targets = [
+                                {key: value.to(device) for key, value in target.items()}
+                                for target in batch["target"]
+                            ]
+                            loss_dict = model(images, targets)
+                            loss = sum(loss_dict.values())
+                        else:
+                            inputs = batch["short"].to(device, non_blocking=True)
+                            targets = batch["target"].to(device, non_blocking=True)
+                            predictions = model(inputs)
+                            if config.task == "flow":
+                                valid = batch["valid_mask"].to(device, non_blocking=True)
+                                error = (
+                                    (predictions - targets).square().sum(dim=1).add(1e-6).sqrt()
+                                )
+                                loss = error[valid].mean() if valid.any() else error.sum() * 0
+                            else:
+                                loss = F.cross_entropy(
+                                    predictions,
+                                    targets.long(),
+                                    ignore_index=int(
+                                        config.data.get("segmentation_ignore_index", 255)
+                                    ),
+                                )
+                        scaled_loss = loss / group_size
+                    scaler.scale(scaled_loss).backward()
+                accumulated_loss += loss.detach().float()
+                if not should_update:
+                    continue
                 if float(config.training.gradient_clip_norm) > 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(
@@ -195,12 +266,18 @@ def main(config: DictConfig) -> None:
                     metrics = {
                         "epoch": epoch,
                         "step": global_step,
-                        "loss": float(loss.item()),
+                        "loss": float((accumulated_loss / group_size).item()),
                         "lr": scheduler.get_last_lr()[0],
+                        "optimization/micro_batches_per_update": group_size,
+                        "optimization/effective_batch_size": (
+                            int(config.training.batch_size) * group_size * world_size
+                        ),
                     }
                     append_metrics(output_dir / "metrics.jsonl", metrics)
                     log_tensorboard_scalars(writer, "train", metrics, global_step)
                     progress.set_postfix(loss=f"{metrics['loss']:.4f}")
+                optimizer.zero_grad(set_to_none=True)
+                accumulated_loss.zero_()
 
             if validation_loader is not None and (
                 (epoch + 1) % int(config.evaluation.every_epochs) == 0

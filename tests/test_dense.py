@@ -1,0 +1,85 @@
+import json
+
+import h5py
+import numpy as np
+import torch
+
+from slassl.data.dataset import EventWindowDataset
+from slassl.data.dense import map_cityscapes_19_to_11, read_dense_target
+from slassl.models.dense import DensePredictionModel
+
+
+def test_reads_m3ed_flow_and_semantic_targets(tmp_path) -> None:
+    path = tmp_path / "targets.h5"
+    with h5py.File(path, "w") as handle:
+        flow = handle.create_group("flow/prophesee/left")
+        flow.create_dataset("x", data=np.ones((1, 3, 4), dtype=np.float32))
+        flow.create_dataset("y", data=np.full((1, 3, 4), 2, dtype=np.float32))
+        handle.create_dataset("predictions", data=np.array([[[0, 1], [10, 18]]]))
+
+    with h5py.File(path, "r") as handle:
+        target = read_dense_target(handle, "m3ed_flow", 0)
+        labels = read_dense_target(handle, "m3ed_segmentation", 0)
+    assert target.shape == (2, 3, 4)
+    assert target[:, 0, 0].tolist() == [1.0, 2.0]
+    assert labels.tolist() == map_cityscapes_19_to_11(
+        np.array([[0, 1], [10, 18]])
+    ).tolist()
+
+
+def test_event_dataset_returns_aligned_flow_target(tmp_path) -> None:
+    events_path = tmp_path / "events.h5"
+    with h5py.File(events_path, "w") as handle:
+        events = handle.create_group("events")
+        events.create_dataset("x", data=np.array([1, 2, 3]))
+        events.create_dataset("y", data=np.array([1, 2, 3]))
+        events.create_dataset("t", data=np.array([5_000, 7_000, 10_000]))
+        events.create_dataset("p", data=np.array([0, 1, 1]))
+
+    flow_path = tmp_path / "flow.h5"
+    with h5py.File(flow_path, "w") as handle:
+        flow = handle.create_group("flow/prophesee/left")
+        flow.create_dataset("x", data=np.ones((1, 8, 8), dtype=np.float32))
+        flow.create_dataset("y", data=np.ones((1, 8, 8), dtype=np.float32))
+
+    manifest = tmp_path / "flow.jsonl"
+    manifest.write_text(
+        json.dumps(
+            {
+                "sequence": events_path.name,
+                "timestamp_us": 10_000,
+                "target": flow_path.name,
+                "target_index": 0,
+                "target_format": "m3ed_flow",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    dataset = EventWindowDataset(
+        manifest,
+        tmp_path,
+        height=8,
+        width=8,
+        bins=2,
+        short_window_us=5_000,
+        long_window_us=10_000,
+        task="flow",
+    )
+    sample = dataset[0]
+    assert sample["target"].shape == (2, 8, 8)
+    assert sample["valid_mask"].any()
+
+
+def test_dense_prediction_model_restores_input_resolution() -> None:
+    config = {
+        "vit_patch_size": 4,
+        "vit_embed_dim": 32,
+        "vit_depth": 4,
+        "vit_num_heads": 4,
+        "decoder_channels": 16,
+        "recurrent": "none",
+    }
+    model = DensePredictionModel("vit_tiny", 4, 2, False, config)
+    output = model(torch.randn(2, 2, 2, 16, 20))
+    assert output.shape == (2, 2, 16, 20)

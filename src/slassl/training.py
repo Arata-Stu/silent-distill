@@ -53,6 +53,13 @@ def build_dataset(
             int(value) for value in data.get("detection_class_ids", [0, 1, 2])
         ],
         detection_min_box_diagonal=float(data.get("detection_min_box_diagonal", 0.0)),
+        segmentation_num_classes=int(data.get("segmentation_num_classes", 11)),
+        segmentation_ignore_index=int(data.get("segmentation_ignore_index", 255)),
+        flow_target_duration_us=(
+            int(data.flow_target_duration_us)
+            if data.get("flow_target_duration_us") is not None
+            else None
+        ),
     )
     sequence_length = int(data.get("sequence_length", 1))
     if sequence_length == 1:

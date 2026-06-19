@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from tqdm import tqdm
 
 
@@ -127,5 +128,150 @@ def evaluate_detection(
             output[group].update(_jsonable_metrics(metric.compute()))
     output["runtime"] = {
         "model_latency_ms_per_sample": 1000.0 * elapsed_seconds / max(counts["all"], 1)
+    }
+    return output
+
+
+def _dense_groups() -> tuple[str, ...]:
+    return ("all", "low", "medium", "high")
+
+
+@torch.inference_mode()
+def evaluate_flow(
+    model: torch.nn.Module,
+    loader: Iterable[dict[str, Any]],
+    device: torch.device,
+    low_max: float,
+    high_min: float,
+) -> dict[str, Any]:
+    model.eval()
+    groups = _dense_groups()
+    sums = {
+        group: {key: 0.0 for key in ("epe", "1pe", "2pe", "3pe", "angle")}
+        for group in groups
+    }
+    valid_pixels = {group: 0 for group in groups}
+    samples = {group: 0 for group in groups}
+    elapsed_seconds = 0.0
+    total_samples = 0
+    for batch in tqdm(loader, desc="evaluate optical flow"):
+        inputs = batch["short"].to(device, non_blocking=True)
+        targets = batch["target"].to(device, non_blocking=True)
+        valid_masks = batch["valid_mask"].to(device, non_blocking=True)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        predictions = model(inputs)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed_seconds += time.perf_counter() - started
+        total_samples += len(inputs)
+        for prediction, target, valid, density in zip(
+            predictions, targets, valid_masks, batch["density"], strict=True
+        ):
+            count = int(valid.sum().item())
+            if not count:
+                continue
+            group = _density_group(float(density), low_max, high_min)
+            selected_prediction = prediction[:, valid].T
+            selected_target = target[:, valid].T
+            epe = (selected_prediction - selected_target).norm(dim=1)
+            prediction_3d = torch.cat(
+                (selected_prediction, torch.ones((count, 1), device=device)), dim=1
+            )
+            target_3d = torch.cat(
+                (selected_target, torch.ones((count, 1), device=device)), dim=1
+            )
+            cosine = F.cosine_similarity(prediction_3d, target_3d, dim=1).clamp(-1, 1)
+            angle = torch.acos(cosine) * (180.0 / torch.pi)
+            for selected_group in ("all", group):
+                sums[selected_group]["epe"] += float(epe.sum().item())
+                sums[selected_group]["1pe"] += float((epe > 1).sum().item())
+                sums[selected_group]["2pe"] += float((epe > 2).sum().item())
+                sums[selected_group]["3pe"] += float((epe > 3).sum().item())
+                sums[selected_group]["angle"] += float(angle.sum().item())
+                valid_pixels[selected_group] += count
+                samples[selected_group] += 1
+    output: dict[str, Any] = {}
+    for group in groups:
+        count = max(valid_pixels[group], 1)
+        output[group] = {
+            "aepe": sums[group]["epe"] / count,
+            "1pe": 100.0 * sums[group]["1pe"] / count,
+            "2pe": 100.0 * sums[group]["2pe"] / count,
+            "3pe": 100.0 * sums[group]["3pe"] / count,
+            "aae_degrees": sums[group]["angle"] / count,
+            "valid_pixels": valid_pixels[group],
+            "samples": samples[group],
+        }
+    output["runtime"] = {
+        "model_latency_ms_per_sample": 1000.0 * elapsed_seconds / max(total_samples, 1)
+    }
+    return output
+
+
+def _segmentation_metrics(confusion: torch.Tensor) -> dict[str, Any]:
+    true_positive = confusion.diagonal().float()
+    ground_truth = confusion.sum(dim=1).float()
+    predicted = confusion.sum(dim=0).float()
+    union = ground_truth + predicted - true_positive
+    present = union > 0
+    iou = torch.zeros_like(union)
+    iou[present] = true_positive[present] / union[present]
+    return {
+        "mean_iou": float(iou[present].mean().item()) if present.any() else 0.0,
+        "overall_accuracy": float(true_positive.sum().item() / max(ground_truth.sum().item(), 1)),
+        "per_class_iou": iou.tolist(),
+        "valid_pixels": int(ground_truth.sum().item()),
+    }
+
+
+@torch.inference_mode()
+def evaluate_segmentation(
+    model: torch.nn.Module,
+    loader: Iterable[dict[str, Any]],
+    device: torch.device,
+    num_classes: int,
+    ignore_index: int,
+    low_max: float,
+    high_min: float,
+) -> dict[str, Any]:
+    model.eval()
+    groups = _dense_groups()
+    confusion = {
+        group: torch.zeros((num_classes, num_classes), dtype=torch.int64) for group in groups
+    }
+    samples = {group: 0 for group in groups}
+    elapsed_seconds = 0.0
+    total_samples = 0
+    for batch in tqdm(loader, desc="evaluate semantic segmentation"):
+        inputs = batch["short"].to(device, non_blocking=True)
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        started = time.perf_counter()
+        predictions = model(inputs).argmax(dim=1).cpu()
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+        elapsed_seconds += time.perf_counter() - started
+        total_samples += len(inputs)
+        for prediction, target, density in zip(
+            predictions, batch["target"], batch["density"], strict=True
+        ):
+            valid = target != ignore_index
+            valid &= (target >= 0) & (target < num_classes)
+            encoded = target[valid].long() * num_classes + prediction[valid].long()
+            sample_confusion = torch.bincount(
+                encoded, minlength=num_classes * num_classes
+            ).reshape(num_classes, num_classes)
+            group = _density_group(float(density), low_max, high_min)
+            for selected_group in ("all", group):
+                confusion[selected_group] += sample_confusion
+                samples[selected_group] += 1
+    output = {
+        group: {**_segmentation_metrics(confusion[group]), "samples": samples[group]}
+        for group in groups
+    }
+    output["runtime"] = {
+        "model_latency_ms_per_sample": 1000.0 * elapsed_seconds / max(total_samples, 1)
     }
     return output

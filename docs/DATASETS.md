@@ -6,12 +6,12 @@
 |---|---|---|---|
 | Prophesee 1 Mpx | supported | FCOS detection | event H5 + bbox NPY |
 | DSEC | supported | not yet implemented | `/events/{x,y,t,p}` |
-| M3ED | supported | not yet implemented | `/prophesee/{left,right}/{x,y,t,p}` |
-| MVSEC | supported | not yet implemented | `/davis/{left,right}/events` |
+| M3ED | supported | optical flow, semantic segmentation | `/prophesee/{left,right}/{x,y,t,p}` |
+| MVSEC | supported | optical flow | `/davis/{left,right}/events` |
 
 「supported」は、native HDF5からcausal short/long voxelを直接生成してSLA-SSL pretrainingを
-実行できることを表します。DSEC/M3ED/MVSECのflow、depth、disparity、segmentation教師ラベルを
-読むloaderとtask headはまだ含まれません。
+実行できることを表します。dense taskはGT timestampへcausal event windowを合わせ、共通の
+multi-scale decoderでfine-tuningします。depthとdisparityはまだ含まれません。
 
 ## Prophesee 1 Mpx
 
@@ -41,6 +41,9 @@ processed `data.h5`はtime-synchronizedかつdecoded済みです。eventは
 distortedなので、dense taskではH5に埋め込まれたcalibrationを使用します。depth、pose、
 semanticsは別H5にあります。
 
+flowは`flow/prophesee/left/{x,y}`と`ts`、semantic pseudo-labelは`predictions`と`ts`を読みます。
+semanticはCityscapes 19 classからDSEC互換11 classへ変換し、ignore labelは255です。
+
 Official references:
 https://m3ed.io/data_overview/datafiles/
 https://github.com/daniilidis-group/m3ed
@@ -49,8 +52,9 @@ https://github.com/daniilidis-group/m3ed
 
 official ROS-free HDF5の`/davis/{left,right}/events`は`[x,y,t,p]` matrixで、timestampはsecondsから
 microsecondsへ変換します。F3の`process_mvsec.py`でsplitされた`events/{x,y,t,p}`版は既にusなので、
-readerがlayoutとdtypeから自動判定します。depth/poseはground-truth HDF5、optical flowはofficial
-toolで生成したNPZを使う想定ですが、現状はevent SSL inputだけに対応しています。
+readerがlayoutとdtypeから自動判定します。flowはground-truth HDF5の
+`/davis/left/flow_dist`と`flow_dist_ts`を読みます。公式評価に合わせてfinite・nonzero・event
+supportを持つpixelを評価し、画像下端の無効領域を除外します。
 
 Official reference:
 https://daniilidis-group.github.io/mvsec/download/

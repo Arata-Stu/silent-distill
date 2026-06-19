@@ -157,6 +157,59 @@ sla-evaluate --config configs/eval/prophesee_1mp_detection.yaml \
   --set checkpoint=/path/to/finetune/checkpoint_last.pt
 ```
 
+M3ED/MVSECのdense downstream manifestはnative GT timestampから作ります。
+
+```bash
+sla-index-dense --dataset m3ed --task flow \
+  --data-root "$M3ED_ROOT" --search-root "$M3ED_ROOT" \
+  --output-dir outputs/m3ed/manifests_dense --split train \
+  --include car_urban_day_penno_big_loop --include car_urban_day_penno_small_loop
+
+sla-index-dense --dataset m3ed --task flow \
+  --data-root "$M3ED_ROOT" --search-root "$M3ED_ROOT" \
+  --output-dir outputs/m3ed/manifests_dense --split val \
+  --include car_urban_day_rittenhouse
+
+sla-index-dense --dataset m3ed --task segmentation \
+  --data-root "$M3ED_ROOT" --search-root "$M3ED_ROOT" \
+  --output-dir outputs/m3ed/manifests_dense --split train \
+  --include car_urban_day_city_hall --include car_urban_day_penno_big_loop
+
+sla-index-dense --dataset m3ed --task segmentation \
+  --data-root "$M3ED_ROOT" --search-root "$M3ED_ROOT" \
+  --output-dir outputs/m3ed/manifests_dense --split val \
+  --include car_urban_day_ucity_small_loop
+
+sla-index-dense --dataset mvsec --task flow \
+  --data-root "$MVSEC_ROOT" --search-root "$MVSEC_ROOT/outdoor_day" \
+  --output-dir outputs/mvsec/manifests_dense --split train \
+  --include outdoor_day2
+
+sla-index-dense --dataset mvsec --task flow \
+  --data-root "$MVSEC_ROOT" --search-root "$MVSEC_ROOT/outdoor_day" \
+  --output-dir outputs/mvsec/manifests_dense --split test \
+  --include outdoor_day1
+```
+
+SSL student encoderをflow/segmentation decoderへ移植してfine-tuningします。
+
+```bash
+sla-finetune --config-name m3ed_flow \
+  training.pretrained_checkpoint=/path/to/pretrain/checkpoint_last.pt \
+  data.root="$M3ED_ROOT" \
+  data.train_manifest="$PWD/outputs/m3ed/manifests_dense/train_flow.jsonl" \
+  data.validation_manifest="$PWD/outputs/m3ed/manifests_dense/val_flow.jsonl"
+
+sla-finetune --config-name m3ed_segmentation \
+  training.pretrained_checkpoint=/path/to/pretrain/checkpoint_last.pt \
+  data.root="$M3ED_ROOT" \
+  data.train_manifest="$PWD/outputs/m3ed/manifests_dense/train_segmentation.jsonl" \
+  data.validation_manifest="$PWD/outputs/m3ed/manifests_dense/val_segmentation.jsonl"
+```
+
+label schema、11-class mapping、flow valid-mask protocolはApache-2.0のFast Feature Fields実装を
+参照しています。F3本体、SegFormer、Transformers依存は取り込んでいません。
+
 scratch 1 ms と scratch 5 ms は同じ fine-tuning 条件から作れます。
 
 ```bash

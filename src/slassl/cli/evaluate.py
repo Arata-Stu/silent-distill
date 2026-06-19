@@ -7,7 +7,12 @@ import torch
 
 from slassl.cli.finetune import build_model
 from slassl.config import config_parser, load_config
-from slassl.evaluation import evaluate_classification, evaluate_detection
+from slassl.evaluation import (
+    evaluate_classification,
+    evaluate_detection,
+    evaluate_flow,
+    evaluate_segmentation,
+)
 from slassl.training import build_dataset, build_loader
 from slassl.utils import dump_json, seed_everything
 
@@ -28,8 +33,22 @@ def main() -> None:
     high_min = float(config.evaluation.high_density_min)
     if config.task == "classification":
         metrics = evaluate_classification(model, loader, device, low_max, high_min)
-    else:
+    elif config.task == "detection":
         metrics = evaluate_detection(model, loader, device, low_max, high_min)
+    elif config.task == "flow":
+        metrics = evaluate_flow(model, loader, device, low_max, high_min)
+    elif config.task == "segmentation":
+        metrics = evaluate_segmentation(
+            model,
+            loader,
+            device,
+            int(config.model.num_classes),
+            int(config.data.get("segmentation_ignore_index", 255)),
+            low_max,
+            high_min,
+        )
+    else:
+        raise ValueError(f"Unknown task: {config.task}")
     metrics["metadata"] = {
         "accumulation_time_ms": float(config.data.short_window_us) / 1000.0,
         "checkpoint": str(config.checkpoint),
