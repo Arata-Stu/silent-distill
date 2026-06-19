@@ -97,3 +97,12 @@ def test_aligns_mvsec_absolute_and_relative_timestamps() -> None:
     assert relative.tolist() == [1_000_000, 2_000_000]
     assert relative_mode == "relative_seconds"
     assert absolute_mode == "absolute_seconds"
+
+
+def test_aligns_raw_mvsec_without_absolute_start_time_attribute() -> None:
+    raw = np.array([1_600_000_001.0, 1_600_000_002.0])
+    timestamps, mode = _align_mvsec_timestamps(
+        raw, None, (1_600_000_000_000_000, 1_600_000_003_000_000)
+    )
+    assert timestamps.tolist() == [1_600_000_001_000_000, 1_600_000_002_000_000]
+    assert mode == "absolute_seconds"

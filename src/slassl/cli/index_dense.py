@@ -69,9 +69,11 @@ def _target_description(
         if f"{group}/flow_dist" not in target or f"{group}/flow_dist_ts" not in target:
             raise ValueError(f"Missing {group}/flow_dist or flow_dist_ts")
         with h5py.File(data_path, "r") as data:
-            if "absolute_start_time" not in data.attrs:
-                raise ValueError("MVSEC data HDF5 is missing absolute_start_time")
-            absolute_start = float(data.attrs["absolute_start_time"])
+            absolute_start = (
+                float(data.attrs["absolute_start_time"])
+                if "absolute_start_time" in data.attrs
+                else None
+            )
         raw_timestamps = np.asarray(target[f"{group}/flow_dist_ts"][:], dtype=np.float64)
         timestamps, alignment = _align_mvsec_timestamps(
             raw_timestamps, absolute_start, event_bounds_us
@@ -81,17 +83,18 @@ def _target_description(
 
 def _align_mvsec_timestamps(
     raw_timestamps: np.ndarray,
-    absolute_start_time: float,
+    absolute_start_time: float | None,
     event_bounds_us: tuple[int, int],
 ) -> tuple[np.ndarray, str]:
     first_us, last_us = event_bounds_us
     candidates = {
         "absolute_seconds": np.rint(raw_timestamps * 1_000_000.0).astype(np.int64),
-        "relative_seconds": np.rint(
-            (raw_timestamps - absolute_start_time) * 1_000_000.0
-        ).astype(np.int64),
         "native_us": np.rint(raw_timestamps).astype(np.int64),
     }
+    if absolute_start_time is not None:
+        candidates["relative_seconds"] = np.rint(
+            (raw_timestamps - absolute_start_time) * 1_000_000.0
+        ).astype(np.int64)
     event_center = (first_us + last_us) / 2.0
 
     def score(timestamps: np.ndarray) -> tuple[int, float]:
@@ -107,7 +110,9 @@ def _align_mvsec_timestamps(
             if value.size
         )
         raise ValueError(
-            f"MVSEC flow timestamps do not overlap event range [{first_us},{last_us}]; {ranges}"
+            f"MVSEC flow timestamps do not overlap event range [{first_us},{last_us}]; "
+            f"{ranges}. If the event timestamps were converted to relative time, the data "
+            "HDF5 must contain the absolute_start_time attribute."
         )
     return timestamps, alignment
 
