@@ -17,6 +17,7 @@ dependencies = [
   "Pillow>=10.0",
   "pypng>=0.20220715.0",
   "PyYAML>=6.0",
+  "scipy>=1.11",
   "tensorboard>=2.16",
   "torch>=2.2",
   "torchvision>=0.17",
@@ -40,6 +41,7 @@ sla-convert-numpy = "slassl.cli.convert_numpy:main"
 sla-visualize-events = "slassl.cli.visualize_events:main"
 sla-visualize-flow = "slassl.cli.visualize_flow:main"
 sla-export-dsec-flow = "slassl.cli.export_dsec_flow:main"
+sla-generate-m3ed-flow = "slassl.cli.generate_m3ed_flow:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
