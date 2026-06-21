@@ -66,7 +66,7 @@ def build_detector(
 
 def load_pretrained_encoder(
     module: nn.Module, checkpoint_path: str, destination_prefix: str
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], dict[str, Any] | None]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state = checkpoint.get("model", checkpoint)
     encoder_state: dict[str, torch.Tensor] = {}
@@ -105,4 +105,9 @@ def load_pretrained_encoder(
     if not encoder_state:
         raise ValueError(f"No student encoder weights found in {checkpoint_path}")
     incompatible = module.load_state_dict(encoder_state, strict=False)
-    return list(incompatible.missing_keys), list(incompatible.unexpected_keys)
+    checkpoint_config = checkpoint.get("config") if isinstance(checkpoint, dict) else None
+    return (
+        list(incompatible.missing_keys),
+        list(incompatible.unexpected_keys),
+        checkpoint_config if isinstance(checkpoint_config, dict) else None,
+    )

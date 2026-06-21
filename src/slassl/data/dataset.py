@@ -242,6 +242,8 @@ class EventWindowDataset(Dataset):
             "density": torch.tensor(density, dtype=torch.float32),
             "sample_id": record.get("sample_id", str(index)),
             "timestamp_us": end_us,
+            "window_start_us": short_start,
+            "accumulation_time_us": end_us - short_start,
         }
         for key in ("output_sequence", "output_index", "target_dt_us", "metric_sequence"):
             if key in record:
@@ -302,12 +304,14 @@ class EventWindowDataset(Dataset):
                 target = target.flip(-1)
                 target[0] = -target[0]
                 valid = valid.flip(-1)
+            target_valid = valid.clone()
             valid_mask_mode = str(record.get("valid_mask_mode", "event_support"))
             if valid_mask_mode == "event_support":
                 valid &= short.abs().sum(dim=(0, 1)) > 0
             elif valid_mask_mode != "target":
                 raise ValueError(f"Unknown flow valid_mask_mode: {valid_mask_mode}")
             sample["target"] = target
+            sample["target_valid_mask"] = target_valid
             sample["valid_mask"] = valid
         elif self.task == "segmentation":
             target = resize_segmentation(
@@ -390,7 +394,7 @@ class EventSequenceDataset(Dataset):
         for key in ("long", "occupancy"):
             if key in samples[0]:
                 output[key] = torch.stack([sample[key] for sample in samples])
-        for key in ("label", "target", "valid_mask"):
+        for key in ("label", "target", "target_valid_mask", "valid_mask"):
             if key in samples[-1]:
                 output[key] = samples[-1][key]
         if "metric_sequence" in samples[-1]:

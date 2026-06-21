@@ -2,12 +2,18 @@ import json
 
 import h5py
 import numpy as np
+import pytest
 import torch
 
 from slassl.data.dataset import EventWindowDataset
 from slassl.data.dense import map_cityscapes_19_to_11, read_dense_target
+from slassl.evaluation import evaluate_flow
 from slassl.models.dense import DensePredictionModel
-from slassl.cli.index_dense import _align_mvsec_timestamps, _temporal_split_bounds
+from slassl.cli.index_dense import (
+    _align_mvsec_timestamps,
+    _target_event_interval,
+    _temporal_split_bounds,
+)
 
 
 def test_reads_m3ed_flow_and_semantic_targets(tmp_path) -> None:
@@ -69,6 +75,7 @@ def test_event_dataset_returns_aligned_flow_target(tmp_path) -> None:
     )
     sample = dataset[0]
     assert sample["target"].shape == (2, 8, 8)
+    assert sample["target_valid_mask"].any()
     assert sample["valid_mask"].any()
 
 
@@ -113,3 +120,46 @@ def test_temporal_split_leaves_a_gap_between_train_and_validation() -> None:
     validation = _temporal_split_bounds(0, 1_000_000, 0.8, 1.0, 50_000)
     assert train == (0, 750_000)
     assert validation == (850_000, 1_000_000)
+
+
+def test_m3ed_flow_uses_the_interval_ending_at_its_timestamp() -> None:
+    timestamps = np.array([10_000, 60_000, 110_000])
+    assert _target_event_interval("m3ed", "flow", timestamps, 0, 10_000) is None
+    assert _target_event_interval("m3ed", "flow", timestamps, 1, 10_000) == (
+        10_000,
+        60_000,
+    )
+
+
+def test_mvsec_flow_uses_the_interval_starting_at_its_timestamp() -> None:
+    timestamps = np.array([10_000, 60_000, 110_000])
+    assert _target_event_interval("mvsec", "flow", timestamps, 1, 10_000) == (
+        60_000,
+        110_000,
+    )
+    assert _target_event_interval("mvsec", "flow", timestamps, 2, 10_000) is None
+
+
+def test_flow_evaluation_reports_sample_and_pixel_averages() -> None:
+    class ZeroFlow(torch.nn.Module):
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return torch.zeros(inputs.shape[0], 2, *inputs.shape[-2:])
+
+    targets = torch.zeros(2, 2, 1, 2)
+    targets[0, 0, 0] = torch.tensor([1.0, 3.0])
+    targets[1, 0, 0] = torch.tensor([10.0, 100.0])
+    valid = torch.tensor([[[True, True]], [[True, False]]])
+    loader = [
+        {
+            "short": torch.zeros(2, 2, 1, 1, 2),
+            "target": targets,
+            "valid_mask": valid,
+            "target_valid_mask": valid,
+            "density": torch.zeros(2),
+            "metric_sequence": ["sequence", "sequence"],
+        }
+    ]
+    metrics = evaluate_flow(ZeroFlow(), loader, torch.device("cpu"), 0.001, 0.01)
+    assert metrics["event_supported"]["sample_average"]["aepe"] == pytest.approx(6.0)
+    assert metrics["event_supported"]["pixel_average"]["aepe"] == pytest.approx(14 / 3)
+    assert metrics["event_supported"]["sequence_average"]["aepe"] == pytest.approx(6.0)

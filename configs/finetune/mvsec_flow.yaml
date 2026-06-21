@@ -21,8 +21,8 @@ data:
   height: 260
   width: 346
   bins: 5
-  short_window_us: 10000
-  long_window_us: 50000
+  short_window_us: 50000
+  long_window_us: 100000
   use_polarity: true
   representation: count
   occupancy_stride: 8
@@ -38,6 +38,7 @@ model:
 
 training:
   pretrained_checkpoint: ${oc.env:PRETRAINED_CHECKPOINT,null}
+  require_pretraining_window_match: true
   resume: null
   epochs: 50
   freeze_backbone_epochs: 0
@@ -55,7 +56,7 @@ training:
 
 evaluation:
   every_epochs: 1
-  monitor: all/aepe
+  monitor: event_supported/sequence_average/aepe
   monitor_mode: min
   visualize_samples: 6
   visualization_max_flow: null

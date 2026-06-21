@@ -24,14 +24,12 @@ downstreamへ移します。
 - Flow train: `outdoor_day2`の先頭80%
 - Flow validation: `outdoor_day2`の末尾20%
 - Flow test: `outdoor_day1`
-- temporal split境界の両側50 msは除外
+- temporal split境界の両側50 msは除外し、GT interval全体がsplit内にあるsampleだけを使う
 - `outdoor_day1`はpretraining、hyperparameter選択、checkpoint選択に使用しない
 
-この主表のFlow入力は10 msで、SLA-SSLのshort-window性能を見るlatency-stress ablationです。
-MVSEC native flow displacementの時間幅全体を観測するSOTA protocolとは分けて扱います。主表で上位の
-Scratch / AE / S2L / SLA条件は、50 ms入力でも再評価し、「SSL objectiveの効果」と「短時間入力の
-難しさ」を切り分けます。F3の45 Hz / 11.25 Hz表との直接比較には、さらにF3固有のwindow、crop、
-flow scaling、集計方法を揃える必要があります。
+Flow入力はnative 20 Hz GTの区間全体です。`flow[i]`に対してeventを`[ts[i],ts[i+1]]`から取り、
+GT displacementを時間scaleしません。SSLではdownstreamへ転送するstudentを50 ms、EMA teacherを
+100 msとします。teacherは追加の過去contextを持ちますが、評価時に使うencoderはstudentです。
 
 以前の`outdoor_day1` SSL checkpointを`outdoor_day1` Flow testへ使う場合はtransductive pretraining
 として別表に分けます。SOTAとの通常比較には使いません。
@@ -58,7 +56,7 @@ sla-index-h5 \
   --split pretrain \
   --camera left \
   --sample-period-us 5000 \
-  --long-window-us 50000 \
+  --long-window-us 100000 \
   --end-fraction 0.8 \
   --boundary-margin-us 50000
 
@@ -68,7 +66,6 @@ sla-index-dense \
   --search-root "$MVSEC_ROOT/outdoor_day" \
   --output-dir "$FLOW_MANIFEST_DIR" \
   --split train --include outdoor_day2 \
-  --short-window-us 10000 \
   --end-fraction 0.8 --boundary-margin-us 50000
 
 sla-index-dense \
@@ -77,7 +74,6 @@ sla-index-dense \
   --search-root "$MVSEC_ROOT/outdoor_day" \
   --output-dir "$FLOW_MANIFEST_DIR" \
   --split val --include outdoor_day2 \
-  --short-window-us 10000 \
   --start-fraction 0.8 --boundary-margin-us 50000
 
 sla-index-dense \
@@ -85,8 +81,7 @@ sla-index-dense \
   --data-root "$MVSEC_ROOT" \
   --search-root "$MVSEC_ROOT/outdoor_day" \
   --output-dir "$FLOW_MANIFEST_DIR" \
-  --split test --include outdoor_day1 \
-  --short-window-us 10000
+  --split test --include outdoor_day1
 ```
 
 ## Pretraining commands
@@ -182,8 +177,9 @@ sla-evaluate \
   --set data.flow_target_duration_us=null
 ```
 
-主表にはAEPE、1PE、2PE、3PE、AAE、model latencyを載せます。pilotで実行系を確定した後、
-seed 42/43/44で同じ実験を行い、平均と標準偏差を報告します。
+主表には`event_supported/sequence_average`のAEPE、1PE、2PE、3PE、AAEを載せます。
+`target_valid`、sample平均、pixel-micro、各sequenceの値も評価JSONへ保存します。pilotで実行系を
+確定した後、seed 42/43/44で同じ実験を行い、平均と標準偏差を報告します。
 
 ## Second-stage ablations
 

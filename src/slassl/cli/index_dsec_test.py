@@ -155,6 +155,7 @@ def main() -> None:
                     "output_sequence": sequence_name,
                     "output_index": int(file_index),
                     "target_dt_us": int(to_us - from_us),
+                    "window_protocol": "target_interval",
                 }
             )
         sequences.append(

@@ -75,15 +75,15 @@ bboxのraw class `0,1,2`はFCOS label `1,2,3`に連続化されます。公式1 
 ```bash
 sla-index-h5 --dataset dsec --data-root /datasets/dsec \
   --search-root /datasets/dsec/train --output-dir /datasets/dsec/manifests --split train \
-  --long-window-us 50000
+  --long-window-us 200000
 
 sla-index-h5 --dataset m3ed --data-root /datasets/m3ed \
   --search-root /datasets/m3ed/train --output-dir /datasets/m3ed/manifests --split train \
-  --long-window-us 50000
+  --long-window-us 100000
 
 sla-index-h5 --dataset mvsec --data-root /datasets/mvsec \
   --search-root /datasets/mvsec/train --output-dir /datasets/mvsec/manifests --split train \
-  --long-window-us 50000
+  --long-window-us 100000
 ```
 
 ```bash
@@ -92,9 +92,13 @@ sla-pretrain --config-name m3ed
 sla-pretrain --config-name mvsec
 ```
 
-pretrainingの共通defaultはstudent側`data.short_window_us=10000`（10 ms）、teacher側
-`data.long_window_us=50000`（50 ms）です。manifest生成時も`--long-window-us 50000`を指定し、
-各sequence先頭でlong windowが欠けるsampleを除外します。
+flow ablation用pretrainingは、転送されるstudent encoderをdownstreamのGT intervalへ合わせ、
+EMA teacherへその2倍の過去contextを与えます。DSECはstudent 100 ms / teacher 200 ms、
+M3ED/MVSECはstudent 50 ms / teacher 100 msです。downstreamへ移植するのはteacherではなくstudent
+なので、評価窓へ合わせるのはstudent側です。manifest生成時の`--long-window-us`にもteacher windowを
+指定し、各sequence先頭でlong windowが欠けるsampleを除外します。flow fine-tuning開始時には
+checkpoint内のstudent/teacher windowを検証し、旧windowのcheckpointを拒否します。1 Mpxはtask固有の
+短時間windowを使います。
 
 対応するnative pathはDSECの`/events/*`、M3EDの`/prophesee/left/*`、MVSECの
 `/davis/left/events`です。right cameraはindex時の`--camera right`とconfigの
@@ -158,6 +162,8 @@ sla-finetune --config-name dsec_flow \
 `DSEC_VAL_SEQUENCE`はplaceholderなので、実データに存在するflow付きsequence名へ置き換えます。
 DSEC downstreamは公式flow区間に合わせて約100 msのeventを使い、flowを時間scaleしません。
 validation maskはPNG第3 channelのGT-valid pixelであり、MVSECのevent-support maskは使いません。
+対応するSSLはstudent 100 ms / EMA teacher 200 msです。旧10/50 ms DSEC SSL checkpointは
+window検証で拒否されるため、200 ms対応manifestから再事前学習します。
 
 ### DSEC flow test submission
 
@@ -254,7 +260,9 @@ sla-evaluate --config configs/eval/prophesee_1mp_detection.yaml \
   --set checkpoint=/path/to/finetune/checkpoint_last.pt
 ```
 
-M3ED/MVSECのdense downstream manifestはnative GT timestampから作ります。
+M3ED/MVSECのdense downstream manifestはnative GT timestampから作ります。flowでは
+`--short-window-us`による固定窓を使わず、M3EDは`flow[i]`に対して`[ts[i-1],ts[i]]`、MVSECは
+`[ts[i],ts[i+1]]`をmanifestの`window_start_us`と`timestamp_us`へ保存します。
 
 ```bash
 sla-index-dense --dataset m3ed --task flow \
@@ -316,14 +324,15 @@ sla-finetune --config-name mvsec_flow \
   data.validation_manifest="$PWD/outputs/mvsec/manifests_dense/val_flow.jsonl"
 ```
 
-flow validationでは通常`all/aepe`を最小化するepochを`checkpoint_best.pt`として保存します。
-DSECはsequence間のsample数差をcheckpoint選択へ持ち込まないため、
-`sequence_average/aepe`を使います。
+M3ED/MVSEC flow validationではevent-supported pixel上のsample平均をsequenceごとに求め、
+`event_supported/sequence_average/aepe`を最小化するepochを`checkpoint_best.pt`として保存します。
+評価JSONにはGT-valid dense、pixel-micro、per-sequenceの値も併記します。
 `evaluation.every_epochs`ごとに固定6 sampleのevent、GT、予測、event-masked GT/予測、評価maskを
 `validation_visualizations/epoch_XXXX/`とTensorBoardの`validation_flow/*`へ記録します。
 MVSECの既定は毎epoch、M3EDの既定は計算量を考慮して5 epochごとです。
 
-fine-tuned optical-flow checkpointは、F3と同じevent-supported protocolで可視化できます。
+fine-tuned optical-flow checkpointは、GT区間と同じevent windowを使うevent-supported protocolで
+可視化できます。
 GTと予測にはsample内で共通のmagnitude scaleを使い、`event_masked`版にはfinite/nonzero GT、
 dataset固有の有効領域、event supportの積を適用します。
 

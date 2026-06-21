@@ -14,8 +14,8 @@ data:
   height: 260
   width: 346
   bins: 5
-  short_window_us: 10000
-  long_window_us: 50000
+  short_window_us: 50000
+  long_window_us: 100000
   use_polarity: true
   representation: count
   occupancy_stride: 8

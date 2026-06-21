@@ -30,7 +30,12 @@ def parser() -> argparse.ArgumentParser:
         default=[],
         help="Keep data files whose filename contains this value; may be repeated",
     )
-    result.add_argument("--short-window-us", type=int, default=10_000)
+    result.add_argument(
+        "--short-window-us",
+        type=int,
+        default=10_000,
+        help="Causal window for point targets; flow windows are inferred from GT intervals",
+    )
     result.add_argument("--target-stride", type=int, default=1)
     result.add_argument(
         "--start-fraction",
@@ -135,6 +140,27 @@ def _align_mvsec_timestamps(
     return timestamps, alignment
 
 
+def _target_event_interval(
+    dataset: str,
+    task: str,
+    timestamps: np.ndarray,
+    target_index: int,
+    point_window_us: int,
+) -> tuple[int, int] | None:
+    target_timestamp_us = int(timestamps[target_index])
+    if task != "flow":
+        return target_timestamp_us - point_window_us, target_timestamp_us
+    if dataset == "m3ed":
+        if target_index == 0:
+            return None
+        return int(timestamps[target_index - 1]), target_timestamp_us
+    if dataset == "mvsec":
+        if target_index + 1 >= len(timestamps):
+            return None
+        return target_timestamp_us, int(timestamps[target_index + 1])
+    raise ValueError(f"Unsupported flow dataset: {dataset}")
+
+
 def _write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
@@ -212,30 +238,60 @@ def main() -> None:
             args.boundary_margin_us,
         )
         kept = 0
+        durations_us: list[int] = []
         for target_index in range(0, len(timestamps), args.target_stride):
-            timestamp_us = int(timestamps[target_index])
-            if timestamp_us - args.short_window_us < first_us or timestamp_us > last_us:
+            interval = _target_event_interval(
+                args.dataset,
+                args.task,
+                timestamps,
+                target_index,
+                args.short_window_us,
+            )
+            if interval is None:
                 continue
-            if timestamp_us < selected_start_us or timestamp_us > selected_end_us:
+            window_start_us, timestamp_us = interval
+            if window_start_us >= timestamp_us:
+                skipped.append(
+                    {
+                        "data": str(data_path),
+                        "reason": f"non-positive target interval at index {target_index}",
+                    }
+                )
+                continue
+            if window_start_us < first_us or timestamp_us > last_us:
+                continue
+            if window_start_us < selected_start_us or timestamp_us > selected_end_us:
                 continue
             record: dict[str, Any] = {
                 "sequence": data_relative,
                 "timestamp_us": timestamp_us,
+                "window_start_us": window_start_us,
                 "sample_id": f"{data_path.stem}:{args.task}:{target_index}",
                 "metric_sequence": data_path.stem.removesuffix("_data"),
                 "target": target_relative,
                 "target_index": target_index,
                 "target_format": target_format,
                 "target_camera": args.camera,
+                "target_timestamp_us": int(timestamps[target_index]),
             }
             if valid_height is not None:
-                record["valid_height"] = valid_height
-            if args.task == "flow" and target_index > 0:
-                record["target_dt_us"] = int(
-                    timestamps[target_index] - timestamps[target_index - 1]
-                )
+                if args.dataset != "mvsec" or "outdoor" in data_path.stem.lower():
+                    record["valid_height"] = valid_height
+            if args.task == "flow":
+                duration_us = timestamp_us - window_start_us
+                record["target_dt_us"] = duration_us
+                record["valid_mask_mode"] = "event_support"
+                record["window_protocol"] = "target_interval"
+                durations_us.append(duration_us)
             records.append(record)
             kept += 1
+        duration_summary = None
+        if durations_us:
+            duration_summary = {
+                "min": min(durations_us),
+                "median": int(np.median(np.asarray(durations_us))),
+                "max": max(durations_us),
+            }
         sequences.append(
             {
                 "data": data_relative,
@@ -245,6 +301,7 @@ def main() -> None:
                 "event_range_us": [first_us, last_us],
                 "target_range_us": [int(timestamps.min()), int(timestamps.max())],
                 "selected_range_us": [selected_start_us, selected_end_us],
+                "target_interval_duration_us": duration_summary,
             }
         )
         if kept == 0:
@@ -272,6 +329,8 @@ def main() -> None:
         "data_root": str(data_root),
         "camera": args.camera,
         "short_window_us": args.short_window_us,
+        "point_target_window_us": args.short_window_us,
+        "window_protocol": "target_interval" if args.task == "flow" else "causal_fixed",
         "target_stride": args.target_stride,
         "start_fraction": args.start_fraction,
         "end_fraction": args.end_fraction,

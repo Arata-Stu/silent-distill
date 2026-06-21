@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import statistics
 from pathlib import Path
 
 import torch
@@ -15,6 +16,29 @@ from slassl.evaluation import (
 )
 from slassl.training import build_dataset, build_loader
 from slassl.utils import dump_json, seed_everything
+
+
+def _accumulation_metadata(dataset: object, fallback_window_us: int) -> dict[str, object]:
+    records = getattr(dataset, "records", [])
+    durations_us = [
+        int(record["timestamp_us"]) - int(record.get("window_start_us", 0))
+        for record in records
+        if "timestamp_us" in record and "window_start_us" in record
+    ]
+    if not durations_us:
+        durations_us = [fallback_window_us]
+    durations_ms = [duration / 1000.0 for duration in durations_us]
+    protocols = sorted(
+        {str(record["window_protocol"]) for record in records if "window_protocol" in record}
+    )
+    return {
+        "mean_ms": statistics.fmean(durations_ms),
+        "median_ms": float(statistics.median(durations_ms)),
+        "min_ms": float(min(durations_ms)),
+        "max_ms": float(max(durations_ms)),
+        "samples": len(durations_ms),
+        "protocols": protocols or ["causal_fixed"],
+    }
 
 
 def main() -> None:
@@ -50,7 +74,9 @@ def main() -> None:
     else:
         raise ValueError(f"Unknown task: {config.task}")
     metrics["metadata"] = {
-        "accumulation_time_ms": float(config.data.short_window_us) / 1000.0,
+        "accumulation_time": _accumulation_metadata(
+            dataset, int(config.data.short_window_us)
+        ),
         "checkpoint": str(config.checkpoint),
     }
     dump_json(metrics, config.output_file)

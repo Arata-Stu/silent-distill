@@ -82,7 +82,28 @@ def load_ssl_weights(model: torch.nn.Module, config: Any) -> None:
     if not checkpoint:
         return
     prefix = "backbone.body." if config.task == "detection" else "encoder."
-    missing, unexpected = load_pretrained_encoder(model, checkpoint, prefix)
+    missing, unexpected, pretraining_config = load_pretrained_encoder(model, checkpoint, prefix)
+    if config.task == "flow" and bool(
+        config.training.get("require_pretraining_window_match", False)
+    ):
+        pretraining_data = (pretraining_config or {}).get("data", {})
+        for key, role in (
+            ("short_window_us", "student"),
+            ("long_window_us", "teacher"),
+        ):
+            pretrained_window = pretraining_data.get(key)
+            expected_window = int(config.data[key])
+            if pretrained_window is None:
+                raise ValueError(
+                    f"Flow fine-tuning requires a checkpoint with data.{key} metadata; "
+                    "set training.require_pretraining_window_match=false only for audited "
+                    "legacy runs"
+                )
+            if int(pretrained_window) != expected_window:
+                raise ValueError(
+                    f"Pretraining {role} accumulation window does not match flow protocol: "
+                    f"checkpoint={int(pretrained_window)} us, expected={expected_window} us"
+                )
     allowed_missing = (
         "head.",
         "decoder.",
@@ -149,6 +170,18 @@ def _is_better(value: float, best: float | None, mode: str) -> bool:
     if not math.isfinite(value):
         return False
     return best is None or (value < best if mode == "min" else value > best)
+
+
+def _flow_training_loss(
+    predictions: torch.Tensor, targets: torch.Tensor, valid: torch.Tensor
+) -> torch.Tensor:
+    error = (predictions - targets).square().sum(dim=1).add(1e-6).sqrt()
+    valid_counts = valid.flatten(1).sum(dim=1)
+    valid_samples = valid_counts > 0
+    if not valid_samples.any():
+        return error.sum() * 0
+    error_sums = (error * valid).flatten(1).sum(dim=1)
+    return (error_sums[valid_samples] / valid_counts[valid_samples]).mean()
 
 
 def _checkpoint_state(
@@ -364,10 +397,7 @@ def main(config: DictConfig) -> None:
                             predictions = model(inputs)
                             if config.task == "flow":
                                 valid = batch["valid_mask"].to(device, non_blocking=True)
-                                error = (
-                                    (predictions - targets).square().sum(dim=1).add(1e-6).sqrt()
-                                )
-                                loss = error[valid].mean() if valid.any() else error.sum() * 0
+                                loss = _flow_training_loss(predictions, targets, valid)
                             else:
                                 loss = F.cross_entropy(
                                     predictions,

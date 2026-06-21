@@ -147,6 +147,7 @@ def main() -> None:
                     "target_format": "dsec_flow",
                     "target_dt_us": to_us - from_us,
                     "valid_mask_mode": "target",
+                    "window_protocol": "target_interval",
                 }
             )
             kept += 1

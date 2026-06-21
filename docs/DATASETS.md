@@ -37,6 +37,7 @@ flow test adapterは公式`test_forward_flow_timestamps.csv`の各
 filenameは`file_index`を6桁zero paddingします。test GTは非公開なので、ローカルreportに精度指標は
 出ません。DSEC serverがrectified left event-camera上のGT-valid全pixelでEPE、1PE、2PE、3PE、AEを
 計算します。MVSEC用のevent-support maskや下端cropはDSECへ適用しません。
+flow用SSLはstudent 100 ms、EMA teacher 200 msとし、studentを公式約100 ms intervalへ合わせます。
 
 train/validation adapterは`forward_timestamps.txt`と同数の`flow/forward/*.png`を対応付けます。
 PNG第3 channelだけをvalid maskとして使うため、GT flowが0の有効pixelも評価対象です。splitは
@@ -69,8 +70,9 @@ https://github.com/daniilidis-group/m3ed
 official ROS-free HDF5の`/davis/{left,right}/events`は`[x,y,t,p]` matrixで、timestampはsecondsから
 microsecondsへ変換します。F3の`process_mvsec.py`でsplitされた`events/{x,y,t,p}`版は既にusなので、
 readerがlayoutとdtypeから自動判定します。flowはground-truth HDF5の
-`/davis/left/flow_dist`と`flow_dist_ts`を読みます。公式評価に合わせてfinite・nonzero・event
-supportを持つpixelを評価し、画像下端の無効領域を除外します。
+`/davis/left/flow_dist`と`flow_dist_ts`を読みます。`flow[i]`には`[ts[i],ts[i+1]]`のeventを
+対応させ、finite・nonzero・event supportを持つpixelをprimary評価に使います。画像下端のcropは
+outdoor sequenceだけに適用し、GT-valid dense評価もsecondaryとして保存します。
 
 Official reference:
 https://daniilidis-group.github.io/mvsec/download/
